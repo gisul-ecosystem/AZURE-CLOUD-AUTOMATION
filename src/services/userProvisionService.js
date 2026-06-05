@@ -1,0 +1,179 @@
+const db = require('../db/postgres');
+const AppError = require('../utils/AppError');
+const {
+  buildUserPayload,
+  createGraphClient,
+  createGraphUserWithRetry,
+  getVerifiedDomain,
+  logAzureUserEvent
+} = require('../provisioners/azure/userProvisioner');
+
+const STATUS_CREATED = 'Created';
+
+const getRequestByIdForUserProvisioning = async (client, requestId) => {
+  const query = `
+    SELECT id, account_count, status
+    FROM requests
+    WHERE id = $1
+    FOR UPDATE
+  `;
+
+  const result = await client.query(query, [requestId]);
+  return result.rows[0] || null;
+};
+
+const getExistingUsersForRequest = async (requestId) => {
+  const query = `
+    SELECT request_id, azure_user_id, username, status
+    FROM azure_users
+    WHERE request_id = $1
+    ORDER BY username ASC
+  `;
+
+  const result = await db.query(query, [requestId]);
+  return result.rows;
+};
+
+const insertAzureUsers = async (client, requestId, createdUsers) => {
+  const insertQuery = `
+    INSERT INTO azure_users (
+      request_id,
+      azure_user_id,
+      username,
+      temporary_password,
+      status
+    )
+    VALUES ($1, $2, $3, $4, $5)
+  `;
+
+  for (const user of createdUsers) {
+    await client.query(insertQuery, [
+      requestId,
+      user.azureUserId,
+      user.username,
+      user.temporaryPassword,
+      STATUS_CREATED
+    ]);
+  }
+};
+
+const provisionUsersForRequest = async (requestId) => {
+  const client = await db.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    const request = await getRequestByIdForUserProvisioning(client, requestId);
+
+    if (!request) {
+      throw new AppError('Request not found.', 404);
+    }
+
+    const accountCount = Number(request.account_count);
+
+    if (!Number.isInteger(accountCount) || accountCount <= 0) {
+      throw new AppError('Request account count is invalid.', 400);
+    }
+
+    const existingUsers = await getExistingUsersForRequest(requestId);
+
+    if (existingUsers.length === accountCount) {
+      await client.query('COMMIT');
+
+      logAzureUserEvent('info', 'azure_user_provision_reused_existing', {
+        requestId,
+        usersCreated: existingUsers.length
+      });
+
+      return {
+        usersCreated: existingUsers.length
+      };
+    }
+
+    if (existingUsers.length > 0 && existingUsers.length !== accountCount) {
+      throw new AppError(
+        'Partial Azure user provisioning exists for this request. Manual review is required.',
+        409
+      );
+    }
+
+    const { graphClient, subscriptionId } = createGraphClient();
+    const verifiedDomain = await getVerifiedDomain(graphClient);
+
+    logAzureUserEvent('info', 'azure_user_provision_started', {
+      requestId,
+      subscriptionId,
+      accountCount,
+      verifiedDomain
+    });
+
+    const createdUsers = [];
+
+    for (let userNumber = 1; userNumber <= accountCount; userNumber += 1) {
+      const { username, temporaryPassword, payload } = buildUserPayload({
+        requestId,
+        userNumber,
+        domain: verifiedDomain
+      });
+
+      const createdUser = await createGraphUserWithRetry(graphClient, payload, requestId);
+
+      createdUsers.push({
+        azureUserId: createdUser.id,
+        username,
+        temporaryPassword
+      });
+    }
+
+    await insertAzureUsers(client, requestId, createdUsers);
+
+    await client.query('COMMIT');
+
+    logAzureUserEvent('info', 'azure_user_provision_success', {
+      requestId,
+      subscriptionId,
+      usersCreated: createdUsers.length
+    });
+
+    return {
+      usersCreated: createdUsers.length
+    };
+  } catch (error) {
+    await client.query('ROLLBACK');
+
+    logAzureUserEvent('error', 'azure_user_provision_failed', {
+      requestId,
+      errorName: error?.name,
+      errorCode: error?.code,
+      statusCode: error?.statusCode || error?.status,
+      message: error?.message
+    });
+
+    throw error;
+  } finally {
+    client.release();
+  }
+};
+
+const getUsersForRequest = async (requestId) => {
+  const query = `
+    SELECT request_id, azure_user_id, username, status
+    FROM azure_users
+    WHERE request_id = $1
+    ORDER BY username ASC
+  `;
+
+  const result = await db.query(query, [requestId]);
+
+  return result.rows.map((row) => ({
+    requestId: row.request_id,
+    azureUserId: row.azure_user_id,
+    username: row.username,
+    status: row.status
+  }));
+};
+
+module.exports = {
+  getUsersForRequest,
+  provisionUsersForRequest
+};

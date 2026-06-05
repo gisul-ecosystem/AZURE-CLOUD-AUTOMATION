@@ -1,0 +1,26 @@
+{
+  "name": "azure-access-management-portal",
+  "version": "1.0.0",
+  "description": "Phase 1 Service Catalog API for Azure Access Management Portal.",
+  "main": "app.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node app.js",
+    "dev": "node app.js",
+    "frontend:dev": "npm --prefix frontend run dev",
+    "frontend:build": "npm --prefix frontend run build"
+  },
+  "dependencies": {
+    "@azure/arm-authorization": "^9.0.0",
+    "@azure/arm-resources": "^7.0.0",
+    "@azure/identity": "^4.13.1",
+    "@microsoft/microsoft-graph-client": "^3.0.7",
+    "axios": "^1.17.0",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.2",
+    "isomorphic-fetch": "^3.0.0",
+    "node-cron": "^4.2.1",
+    "nodemailer": "^8.0.10",
+    "pg": "^8.13.1"
+  }
+}
