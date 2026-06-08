@@ -2,10 +2,31 @@
 
 import ServiceSelector from './ServiceSelector';
 
+const formatMoney = (value) =>
+  new Intl.NumberFormat('en-US', {
+    style: 'currency',
+    currency: 'USD',
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 2
+  }).format(Number(value || 0));
+
+const getRegionRankLabel = (index) => {
+  if (index === 0) {
+    return '\u{1F947} Cheapest';
+  }
+
+  if (index === 1) {
+    return '\u{1F948} Mid';
+  }
+
+  return '\u{1F949} Expensive';
+};
+
 export default function RequestForm({
   form,
   locations = [],
   serviceGroups = [],
+  services = [],
   selectedServiceIds = [],
   onFieldChange,
   onSelectionChange,
@@ -28,7 +49,7 @@ export default function RequestForm({
           <h2>Create Access Request</h2>
         </div>
         <p className="section-copy">
-          Capture the customer details, pick the Azure region, and choose the services before the
+          Capture the customer details, choose services first, then pick the best Azure region before the
           backend orchestration begins.
         </p>
       </div>
@@ -62,27 +83,6 @@ export default function RequestForm({
           </label>
 
           <label className="field">
-            <span className="field__label">Azure Region</span>
-            <select
-              name="location"
-              value={form.location}
-              onChange={onFieldChange}
-              required
-              disabled={locationsLoading || locations.length === 0}
-            >
-              {locations.length === 0 ? (
-                <option value="">{locationsLoading ? 'Loading regions...' : 'No regions available'}</option>
-              ) : null}
-              {locations.map((region) => (
-                <option key={region.arm_region_name || region.value} value={region.arm_region_name || region.value}>
-                  {region.display_location || region.label}
-                </option>
-              ))}
-            </select>
-            {locationsError ? <span className="inline-note">{locationsError}</span> : null}
-          </label>
-
-          <label className="field">
             <span className="field__label">Service Start Date</span>
             <input
               type="date"
@@ -103,17 +103,6 @@ export default function RequestForm({
               required
             />
           </label>
-
-          <label className="field">
-            <span className="field__label">Expiry Date</span>
-            <input
-              type="date"
-              name="expiryDate"
-              value={form.expiryDate}
-              onChange={onFieldChange}
-              required
-            />
-          </label>
         </div>
 
         <div className="surface" style={{ padding: 16 }}>
@@ -127,6 +116,7 @@ export default function RequestForm({
 
           <ServiceSelector
             serviceGroups={serviceGroups}
+            services={services}
             selectedServiceIds={selectedServiceIds}
             onSelectionChange={onSelectionChange}
             loadingServices={loadingServices}
@@ -138,7 +128,62 @@ export default function RequestForm({
           <p className="inline-note" style={{ marginTop: 12 }}>
             Some services may not support automated provisioning.
           </p>
+        </div>
+
+        {selectedServiceIds.length > 0 ? (
+          <div className="surface" style={{ padding: 16 }}>
+            <div className="panel__heading" style={{ marginBottom: 14 }}>
+              <div>
+                <h3>Available Regions</h3>
+                <p>Loaded only after the selected services are validated against each region.</p>
+              </div>
+              <span className="helper-badge">
+                {locations.length > 0 ? `${locations.length} matches` : locationsLoading ? 'Loading' : 'No matches'}
+              </span>
+            </div>
+
+            <label className="field">
+              <span className="field__label">Azure Region</span>
+              <select
+                name="location"
+                value={form.location}
+                onChange={onFieldChange}
+                required
+                disabled={locationsLoading || locations.length === 0}
+              >
+                {locations.length === 0 ? (
+                  <option value="">{locationsLoading ? 'Loading regions...' : 'No matching regions'}</option>
+                ) : (
+                  locations.map((region, index) => {
+                    const label = region.display_location || region.label || region.arm_region_name || region.value;
+                    return (
+                      <option key={region.arm_region_name || region.value} value={region.arm_region_name || region.value}>
+                        {getRegionRankLabel(index)} {label} ({formatMoney(region.basePrice, region.currency)})
+                      </option>
+                    );
+                  })
+                )}
+              </select>
+              {locationsError ? <span className="inline-note">{locationsError}</span> : null}
+              <span className="inline-note">
+                Regions are sorted by the lowest combined price for the selected services.
+              </span>
+            </label>
           </div>
+        ) : null}
+
+        <div className="surface" style={{ padding: 16 }}>
+          <label className="field">
+            <span className="field__label">Expiry Date</span>
+            <input
+              type="date"
+              name="expiryDate"
+              value={form.expiryDate}
+              onChange={onFieldChange}
+              required
+            />
+          </label>
+        </div>
 
         {error ? <div className="error-box">{error}</div> : null}
 

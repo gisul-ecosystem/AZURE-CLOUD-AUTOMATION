@@ -193,6 +193,110 @@ const getActiveServices = async (category, location) => {
 
 const getDistinctLocations = async () => azureCatalogSyncService.getDistinctLocations();
 
+const getServiceCatalog = async () => {
+  const query = `
+    SELECT
+      MIN(id) AS id,
+      service_name AS name,
+      COALESCE(service_family, 'General') AS category,
+      MIN(retail_price) AS price,
+      MIN(currency) AS currency,
+      COUNT(DISTINCT arm_region_name) AS location_count,
+      MIN(pricing_source) AS pricing_source
+    FROM service_locations
+    WHERE retail_price >= 0
+    GROUP BY service_name, service_family
+    ORDER BY price ASC, service_name
+  `;
+
+  const result = await db.query(query);
+
+  return result.rows;
+};
+
+const getAvailableLocations = async (serviceIds) => {
+  const normalizedServiceIds = Array.from(
+    new Set(
+      (Array.isArray(serviceIds) ? serviceIds : [])
+        .map((serviceId) => Number(serviceId))
+        .filter((serviceId) => Number.isInteger(serviceId) && serviceId > 0)
+    )
+  );
+
+  if (normalizedServiceIds.length === 0) {
+    return [];
+  }
+
+  const selectedNamesResult = await db.query(
+    `
+      SELECT
+        id,
+        name
+      FROM services
+      WHERE id = ANY($1::int[])
+    `,
+    [normalizedServiceIds]
+  );
+
+  const selectedNames = Array.from(
+    new Set(
+      selectedNamesResult.rows
+        .map((row) => row.name)
+        .filter((name) => typeof name === 'string' && name.trim().length > 0)
+    )
+  );
+
+  if (selectedNames.length === 0) {
+    const fallbackNamesResult = await db.query(
+      `
+        SELECT DISTINCT
+          service_name AS name
+        FROM service_locations
+        WHERE id = ANY($1::int[])
+      `,
+      [normalizedServiceIds]
+    );
+
+    fallbackNamesResult.rows.forEach((row) => {
+      if (typeof row.name === 'string' && row.name.trim().length > 0) {
+        selectedNames.push(row.name);
+      }
+    });
+  }
+
+  const query = `
+    SELECT
+      sl.arm_region_name,
+      MIN(sl.display_location) AS display_location,
+      MIN(sl.retail_price) AS base_price,
+      MIN(sl.currency) AS currency,
+      COUNT(DISTINCT sl.service_name) AS matched
+    FROM service_locations sl
+    WHERE EXISTS (
+      SELECT 1
+      FROM unnest($1::text[]) AS selected_name(name)
+      WHERE LOWER(sl.service_name) ILIKE '%' || LOWER(selected_name.name) || '%'
+    )
+    GROUP BY sl.arm_region_name
+    ORDER BY base_price ASC
+  `;
+
+  const result = await db.query(query, [selectedNames]);
+
+  console.log({
+    selectedServiceIds: normalizedServiceIds,
+    selectedNames,
+    locationCount: result.rows.length
+  });
+
+  return result.rows.map((row) => ({
+    arm_region_name: row.arm_region_name,
+    display_location: row.display_location,
+    base_price: Number(row.base_price) || 0,
+    currency: row.currency || 'USD'
+  }));
+};
+
 const getActiveServicesWithPricing = async (location) => {
   const resolvedLocation = normalizeLocation(location);
   const cachedPricing = getCachedPricing(resolvedLocation);
@@ -269,6 +373,8 @@ const getActiveServicesWithPricing = async (location) => {
 
 module.exports = {
   getActiveServices,
+  getServiceCatalog,
+  getAvailableLocations,
   getActiveServicesWithPricing,
   getDistinctLocations
 };

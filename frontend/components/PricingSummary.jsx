@@ -14,7 +14,7 @@ export default function PricingSummary({
       <div className="panel__heading">
         <div>
           <h3>Pricing Summary</h3>
-          <p>Live estimate updates as the account count and selected services change.</p>
+          <p>Live estimate updates as the account count, selected services, and chosen region change.</p>
         </div>
         <span className="helper-badge">Calculated in real time</span>
       </div>

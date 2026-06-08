@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { getServices } from '../services/api';
+import { getServiceCatalog } from '../services/api';
 
 const CACHE_TTL_MS = 30 * 1000;
 const pricingCache = new Map();
@@ -9,22 +9,23 @@ const EMPTY_SERVICES = [];
 
 const normalizeService = (service) => {
   const price = Number(service?.retail_price ?? service?.price ?? service?.price_per_user ?? 0);
-  const currency = service?.currency || service?.currency_code || 'USD';
+  const currency = service?.currency || 'USD';
 
   return {
     ...service,
     id: String(service?.id ?? service?.service_name ?? service?.name ?? ''),
     service_name: service?.service_name || service?.name || '',
-    service_family: service?.service_family || service?.category || 'Uncategorized',
+    service_family: service?.service_family || service?.category || 'General',
     retail_price: Number.isFinite(price) ? price : 0,
     currency,
-    pricingSource: service?.pricingSource || 'azure',
+    pricing_source: service?.pricing_source || service?.pricingSource || 'Fallback',
     display_location: service?.display_location || service?.location || '',
-    unit_of_measure: service?.unit_of_measure || service?.unitOfMeasure || ''
+    unit_of_measure: service?.unit_of_measure || service?.unitOfMeasure || '',
+    location_count: Number(service?.location_count ?? service?.availableRegions ?? service?.available_regions ?? 0) || 0
   };
 };
 
-export default function useServicePricing(location, initialServices = EMPTY_SERVICES) {
+export default function useServicePricing(initialServices = EMPTY_SERVICES) {
   const [services, setServices] = useState(() => initialServices.map(normalizeService));
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -32,17 +33,10 @@ export default function useServicePricing(location, initialServices = EMPTY_SERV
 
   useEffect(() => {
     let cancelled = false;
-    const resolvedLocation = typeof location === 'string' ? location.trim() : '';
+    const cacheKey = '__catalog__';
 
     const loadServicePricing = async () => {
-      if (!resolvedLocation) {
-        setServices([]);
-        setLoading(false);
-        setError('');
-        return;
-      }
-
-      const cachedEntry = pricingCache.get(resolvedLocation);
+      const cachedEntry = pricingCache.get(cacheKey);
 
       if (cachedEntry && cachedEntry.expiresAt > Date.now()) {
         setServices(cachedEntry.value);
@@ -54,7 +48,7 @@ export default function useServicePricing(location, initialServices = EMPTY_SERV
       setLoading(true);
 
       try {
-        const response = await getServices(resolvedLocation);
+        const response = await getServiceCatalog();
         console.log('services_response', response);
 
         const rawServices = Array.isArray(response?.data)
@@ -73,7 +67,7 @@ export default function useServicePricing(location, initialServices = EMPTY_SERV
 
         setServices(nextServices);
         console.log('services_state', nextServices);
-        pricingCache.set(resolvedLocation, {
+        pricingCache.set(cacheKey, {
           value: nextServices,
           expiresAt: Date.now() + CACHE_TTL_MS
         });
@@ -97,12 +91,10 @@ export default function useServicePricing(location, initialServices = EMPTY_SERV
     return () => {
       cancelled = true;
     };
-  }, [location, refreshTick, initialServices]);
+  }, [refreshTick, initialServices]);
 
   const refresh = () => {
-    if (typeof location === 'string' && location.trim()) {
-      pricingCache.delete(location.trim());
-    }
+    pricingCache.delete('__catalog__');
     setRefreshTick((current) => current + 1);
   };
 

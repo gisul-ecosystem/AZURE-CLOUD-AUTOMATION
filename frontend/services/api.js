@@ -88,6 +88,31 @@ export async function getServices(location = '') {
   return payload?.data || payload || [];
 }
 
+export async function getServiceCatalog() {
+  const payload = await requestJson('/api/services/catalog');
+  return payload?.services || payload?.data || payload || [];
+}
+
+export async function getAvailableLocations(serviceIds = []) {
+  const resolvedServiceIds = Array.from(
+    new Set(
+      (Array.isArray(serviceIds) ? serviceIds : [])
+        .map((serviceId) => Number(serviceId))
+        .filter((serviceId) => Number.isInteger(serviceId) && serviceId > 0)
+    )
+  );
+
+  if (resolvedServiceIds.length === 0) {
+    return [];
+  }
+
+  const payload = await requestJson(
+    `/api/services/available-locations?serviceIds=${encodeURIComponent(resolvedServiceIds.join(','))}`
+  );
+
+  return payload?.locations || payload?.data || payload || [];
+}
+
 export async function getServicePricing(location = 'eastus') {
   const resolvedLocation = location || 'eastus';
   const payload = await requestJson(

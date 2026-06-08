@@ -30,7 +30,15 @@ const getPositiveInteger = (value) => {
 
 export default function RequestWorkspace() {
   const router = useRouter();
-  const { locations, loading: locationsLoading, error: locationsError } = useLocations();
+  const [selectedServices, setSelectedServices] = useState([]);
+  const selectedServiceIds = useMemo(
+    () =>
+      selectedServices
+        .map((id) => Number(id))
+        .filter((value) => Number.isInteger(value) && value > 0),
+    [selectedServices]
+  );
+  const { locations, loading: locationsLoading, error: locationsError } = useLocations(selectedServiceIds);
   const [form, setForm] = useState({
     customerEmail: '',
     accountCount: '',
@@ -39,7 +47,6 @@ export default function RequestWorkspace() {
     endDate: getDatePlusDays(30),
     expiryDate: getInitialExpiry()
   });
-  const [selectedServices, setSelectedServices] = useState([]);
   const [pricing, setPricing] = useState({
     loading: false,
     error: '',
@@ -56,19 +63,23 @@ export default function RequestWorkspace() {
     services: pricedServices,
     loading: servicesLoading,
     error: servicesError
-  } = useServicePricing(form.location);
+  } = useServicePricing();
 
   useEffect(() => {
-    if (!form.location && locations.length > 0) {
-      setForm((current) => ({
-        ...current,
-        location: locations[0].arm_region_name || locations[0].value
-      }));
-    }
-  }, [form.location, locations]);
+    setForm((current) => (current.location ? { ...current, location: '' } : current));
+    setPricing({
+      loading: false,
+      error: '',
+      totalPrice: null,
+      basePrice: null,
+      duration: 0,
+      accounts: 0,
+      services: 0
+    });
+  }, [selectedServiceIds.join(',')]);
 
   useEffect(() => {
-    if (!form.location || locations.length === 0) {
+    if (selectedServiceIds.length === 0 || locationsLoading || locations.length === 0) {
       return;
     }
 
@@ -76,13 +87,13 @@ export default function RequestWorkspace() {
       (region) => (region.arm_region_name || region.value) === form.location
     );
 
-    if (!hasCurrentLocation) {
+    if (!form.location || !hasCurrentLocation) {
       setForm((current) => ({
         ...current,
         location: locations[0].arm_region_name || locations[0].value
       }));
     }
-  }, [form.location, locations]);
+  }, [form.location, locations, locationsLoading, selectedServiceIds.length]);
 
   useEffect(() => {
     const availableIds = new Set(pricedServices.map((service) => Number(service.id)));
@@ -108,33 +119,6 @@ export default function RequestWorkspace() {
       days: hours / 24
     };
   }, [form.startDate, form.endDate]);
-
-  const serviceGroups = useMemo(() => {
-    const grouped = pricedServices.reduce((acc, service) => {
-      const groupKey = String(service.service_family || service.category || 'Uncategorized');
-
-      if (!acc.has(groupKey)) {
-        acc.set(groupKey, {
-          key: groupKey,
-          label: groupKey,
-          services: []
-        });
-      }
-
-      acc.get(groupKey).services.push(service);
-      return acc;
-    }, new Map());
-
-    return Array.from(grouped.values()).sort((left, right) => left.label.localeCompare(right.label));
-  }, [pricedServices]);
-
-  const selectedServiceIds = useMemo(
-    () =>
-      selectedServices
-        .map((id) => Number(id))
-        .filter((value) => Number.isInteger(value) && value > 0),
-    [selectedServices]
-  );
 
   const selectedCatalogServices = useMemo(() => {
     const selectedIds = new Set(selectedServices.map((id) => String(id)));
@@ -175,14 +159,35 @@ export default function RequestWorkspace() {
   });
 
   useEffect(() => {
+    if (selectedServiceIds.length === 0 || !form.location) {
+      setPricing({
+        loading: false,
+        error: '',
+        totalPrice: null,
+        basePrice: null,
+        duration: 0,
+        accounts: 0,
+        services: 0
+      });
+      return;
+    }
+
+    if (servicesLoading) {
+      setPricing({
+        loading: true,
+        error: '',
+        totalPrice: null,
+        basePrice: null,
+        duration: selectedDuration.days,
+        accounts: Number(parsedAccountCount || 1),
+        services: selectedCatalogServices.length
+      });
+      return;
+    }
+
     const selected = pricedServices.filter((service) => selectedServices.includes(String(service.id)));
-    const basePrice = selected.reduce((sum, service) => sum + Number(service.price || 0), 0);
-    const start = new Date(form.startDate);
-    const end = new Date(form.endDate);
-    const duration =
-      form.startDate && form.endDate && Number.isFinite(start.getTime()) && Number.isFinite(end.getTime())
-        ? Math.max(1, Math.ceil((end.getTime() - start.getTime()) / 86400000))
-        : 0;
+    const basePrice = selected.reduce((sum, service) => sum + Number(service.retail_price || service.price || 0), 0);
+    const duration = selectedDuration.days > 0 ? Math.max(1, Math.ceil(selectedDuration.days)) : 0;
     const accounts = Number(parsedAccountCount || 1);
     const total = basePrice * duration * accounts;
 
@@ -195,7 +200,16 @@ export default function RequestWorkspace() {
       services: selected.length,
       totalPrice: Number(total.toFixed(2))
     });
-  }, [selectedServices, parsedAccountCount, form.startDate, form.endDate, pricedServices]);
+  }, [
+    selectedServices,
+    selectedServiceIds.length,
+    parsedAccountCount,
+    form.location,
+    selectedDuration.days,
+    pricedServices,
+    servicesLoading,
+    selectedCatalogServices.length
+  ]);
 
   const handleSubmit = async (event) => {
     event.preventDefault();
@@ -224,6 +238,11 @@ export default function RequestWorkspace() {
           ? 'Service unavailable for provisioning'
           : 'Select at least one service before submitting.'
       );
+      return;
+    }
+
+    if (!form.location) {
+      setSubmitError('Select a region for the selected services.');
       return;
     }
 
@@ -274,7 +293,7 @@ export default function RequestWorkspace() {
           <span className="brand__eyebrow">Request Builder</span>
           <h1>Create Customer Request</h1>
           <p>
-            Choose services, select the Azure region, estimate pricing, and launch the
+            Choose services first, select the cheapest eligible Azure region, estimate pricing, and launch the
             provisioning flow.
           </p>
         </div>
@@ -290,7 +309,7 @@ export default function RequestWorkspace() {
         <RequestForm
           form={form}
           locations={locations}
-          serviceGroups={serviceGroups}
+          services={pricedServices}
           selectedServiceIds={selectedServices}
           onFieldChange={updateField}
           onSelectionChange={setSelectedServices}
@@ -320,7 +339,7 @@ export default function RequestWorkspace() {
             title="Flow Preview"
             description="This is the exact sequence that begins after submission."
             events={[
-              { title: 'Pricing', message: 'Calculate the estimated monthly cost from selected services.' },
+              { title: 'Pricing', message: 'Use the chosen region to calculate the estimated monthly cost from the selected services.' },
               { title: 'Request', message: 'Create the request record and capture the request ID.' },
               { title: 'Provisioning', message: 'Create the resource group, users, roles, and credentials.' },
               { title: 'Status', message: 'Redirect to the live status page once the request is created.' }

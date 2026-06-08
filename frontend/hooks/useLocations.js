@@ -1,13 +1,10 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { getLocations } from '../services/api';
+import { getAvailableLocations } from '../services/api';
 
 const CACHE_TTL_MS = 30 * 1000;
-const locationsCache = {
-  value: null,
-  expiresAt: 0
-};
+const locationsCache = new Map();
 
 const normalizeLocation = (location) => {
   if (typeof location === 'string') {
@@ -23,10 +20,15 @@ const normalizeLocation = (location) => {
   }
 
   if (location && typeof location === 'object') {
-    const armRegionName = String(location.arm_region_name || location.value || location.location || '').trim().toLowerCase();
+    const armRegionName = String(location.arm_region_name || location.region || location.value || '')
+      .trim()
+      .toLowerCase();
     const displayLocation = String(location.display_location || location.label || location.name || '').trim();
     const label = displayLocation || armRegionName;
-    const value = armRegionName || String(location.value || location.location || label).trim().toLowerCase();
+    const value = armRegionName || String(location.value || label).trim().toLowerCase();
+    const basePrice = Number(location.basePrice ?? location.base_price ?? location.total_price ?? location.price ?? 0);
+    const serviceCount = Number(location.serviceCount ?? location.service_count ?? location.matched ?? 0);
+    const currency = String(location.currency || 'USD').trim().toUpperCase() || 'USD';
 
     if (!label && !value) {
       return null;
@@ -36,7 +38,10 @@ const normalizeLocation = (location) => {
       arm_region_name: value || label,
       display_location: label || value,
       label: label || value,
-      value: value || label
+      value: value || label,
+      basePrice: Number.isFinite(basePrice) ? basePrice : 0,
+      serviceCount: Number.isFinite(serviceCount) ? serviceCount : 0,
+      currency
     };
   }
 
@@ -45,9 +50,20 @@ const normalizeLocation = (location) => {
 
 const normalizeLocations = (locations) => (Array.isArray(locations) ? locations.map(normalizeLocation).filter(Boolean) : []);
 
-export default function useLocations() {
-  const [locations, setLocations] = useState(() => normalizeLocations(locationsCache.value || []));
-  const [loading, setLoading] = useState(!locationsCache.value);
+const normalizeServiceIds = (serviceIds) =>
+  Array.from(
+    new Set(
+      (Array.isArray(serviceIds) ? serviceIds : [])
+        .map((serviceId) => Number(serviceId))
+        .filter((serviceId) => Number.isInteger(serviceId) && serviceId > 0)
+    )
+  ).sort((left, right) => left - right);
+
+export default function useLocations(serviceIds = []) {
+  const resolvedServiceIds = normalizeServiceIds(serviceIds);
+  const cacheKey = resolvedServiceIds.join(',');
+  const [locations, setLocations] = useState([]);
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [refreshTick, setRefreshTick] = useState(0);
 
@@ -55,10 +71,18 @@ export default function useLocations() {
     let cancelled = false;
 
     const loadLocations = async () => {
-      const cached = locationsCache.value;
+      if (resolvedServiceIds.length === 0) {
+        setLocations([]);
+        setError('');
+        setLoading(false);
+        return;
+      }
 
-      if (cached && locationsCache.expiresAt > Date.now()) {
-        setLocations(normalizeLocations(cached));
+      const cached = locationsCache.get(cacheKey);
+
+      if (cached && cached.expiresAt > Date.now()) {
+        setLocations(normalizeLocations(cached.value));
+        setError('');
         setLoading(false);
         return;
       }
@@ -66,14 +90,16 @@ export default function useLocations() {
       setLoading(true);
 
       try {
-        const nextLocations = normalizeLocations(await getLocations());
+        const nextLocations = normalizeLocations(await getAvailableLocations(resolvedServiceIds));
 
         if (cancelled) {
           return;
         }
 
-        locationsCache.value = nextLocations;
-        locationsCache.expiresAt = Date.now() + CACHE_TTL_MS;
+        locationsCache.set(cacheKey, {
+          value: nextLocations,
+          expiresAt: Date.now() + CACHE_TTL_MS
+        });
         setLocations(nextLocations);
         setError('');
       } catch (nextError) {
@@ -95,10 +121,12 @@ export default function useLocations() {
     return () => {
       cancelled = true;
     };
-  }, [refreshTick]);
+  }, [cacheKey, refreshTick, resolvedServiceIds.length]);
 
   const refresh = () => {
-    locationsCache.expiresAt = 0;
+    if (cacheKey) {
+      locationsCache.delete(cacheKey);
+    }
     setRefreshTick((current) => current + 1);
   };
 

@@ -4,6 +4,7 @@ const apiResponse = require('../utils/apiResponse');
 
 const allowedQueryParams = new Set(['category', 'location']);
 const allowedPricingQueryParams = new Set(['location']);
+const allowedAvailableLocationsQueryParams = new Set(['serviceIds']);
 
 const validateQueryParams = (query) => {
   const queryKeys = Object.keys(query);
@@ -85,6 +86,32 @@ const getServicePricing = async (req, res, next) => {
   }
 };
 
+const getCatalogServices = async (req, res, next) => {
+  try {
+    if (Object.keys(req.query).length > 0) {
+      throw new AppError('The /api/services/catalog endpoint does not accept query parameters.', 400);
+    }
+
+    const services = await serviceService.getServiceCatalog();
+
+    console.log(
+      JSON.stringify({
+        event: 'catalog_loaded',
+        count: services.length,
+        firstService: services[0]?.name || services[0]?.service_name || null,
+        timestamp: new Date().toISOString()
+      })
+    );
+
+    res.status(200).json({
+      success: true,
+      services
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 const getLocations = async (req, res, next) => {
   try {
     if (Object.keys(req.query).length > 0) {
@@ -104,8 +131,54 @@ const getLocations = async (req, res, next) => {
   }
 };
 
+const normalizeServiceIds = (value) => {
+  const rawValues = Array.isArray(value)
+    ? value
+    : typeof value === 'string'
+      ? value.split(',')
+      : [];
+
+  const serviceIds = rawValues
+    .map((serviceId) => Number(String(serviceId).trim()))
+    .filter((serviceId) => Number.isInteger(serviceId) && serviceId > 0);
+
+  if (serviceIds.length === 0) {
+    throw new AppError('serviceIds must be a non-empty array of positive integers.', 400);
+  }
+
+  if (new Set(serviceIds).size !== serviceIds.length) {
+    throw new AppError('serviceIds must not contain duplicates.', 400);
+  }
+
+  return serviceIds;
+};
+
+const getAvailableLocations = async (req, res, next) => {
+  try {
+    const queryKeys = Object.keys(req.query);
+    const invalidQueryParams = queryKeys.filter((key) => !allowedAvailableLocationsQueryParams.has(key));
+
+    if (invalidQueryParams.length > 0) {
+      throw new AppError(`Invalid query parameter(s): ${invalidQueryParams.join(', ')}`, 400);
+    }
+
+    const rawServiceIds = req.body?.serviceIds ?? req.query.serviceIds;
+    const serviceIds = normalizeServiceIds(rawServiceIds);
+    const locations = await serviceService.getAvailableLocations(serviceIds);
+
+    res.status(200).json({
+      success: true,
+      locations
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   getServices,
   getServicePricing,
-  getLocations
+  getCatalogServices,
+  getLocations,
+  getAvailableLocations
 };
