@@ -5,7 +5,6 @@ async function createRequest({
   customerEmail,
   accountCount,
   location,
-  expiryDate,
   serviceIds,
   provisionServiceIds,
   startDate,
@@ -150,7 +149,7 @@ async function createRequest({
           customerEmail,
           accountCount,
           location,
-          expiryDate,
+          endDate,
           estimatedPrice,
           'Pending'
         ]

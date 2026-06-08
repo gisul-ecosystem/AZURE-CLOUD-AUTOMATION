@@ -1,13 +1,12 @@
 const AppError = require('../utils/AppError');
 const requestService = require('../services/requestService');
+const { parseFlexibleDateTime } = require('../utils/dateTime');
 
 const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-const isoDatePattern = /^\d{4}-\d{2}-\d{2}$/;
 const allowedRequestFields = new Set([
   'customerEmail',
   'accountCount',
   'location',
-  'expiryDate',
   'serviceIds',
   'provisionServiceIds',
   'startDate',
@@ -16,7 +15,7 @@ const allowedRequestFields = new Set([
 
 const validateRequestPayload = (body) => {
   const invalidFields = Object.keys(body).filter((field) => !allowedRequestFields.has(field));
-  const { customerEmail, accountCount, location, expiryDate, serviceIds, provisionServiceIds, startDate, endDate } = body;
+  const { customerEmail, accountCount, location, serviceIds, provisionServiceIds, startDate, endDate } = body;
 
   if (invalidFields.length > 0) {
     throw new AppError(`Invalid field(s): ${invalidFields.join(', ')}`, 400);
@@ -34,39 +33,16 @@ const validateRequestPayload = (body) => {
     throw new AppError('location must be a non-empty string.', 400);
   }
 
-  if (typeof expiryDate !== 'string' || !isoDatePattern.test(expiryDate)) {
-    throw new AppError('expiryDate must be in YYYY-MM-DD format.', 400);
-  }
-
-  const [year, month, day] = expiryDate.split('-').map(Number);
-  const parsedExpiryDate = new Date(Date.UTC(year, month - 1, day));
-
-  if (
-    Number.isNaN(parsedExpiryDate.getTime()) ||
-    parsedExpiryDate.getUTCFullYear() !== year ||
-    parsedExpiryDate.getUTCMonth() !== month - 1 ||
-    parsedExpiryDate.getUTCDate() !== day
-  ) {
-    throw new AppError('expiryDate must be a valid calendar date.', 400);
-  }
-
-  const today = new Date();
-  today.setUTCHours(0, 0, 0, 0);
-
-  if (parsedExpiryDate < today) {
-    throw new AppError('expiryDate cannot be in the past.', 400);
-  }
-
   if (!Array.isArray(serviceIds) || serviceIds.length === 0) {
     throw new AppError('serviceIds must be a non-empty array.', 400);
   }
 
-  if (startDate !== undefined && (typeof startDate !== 'string' || !isoDatePattern.test(startDate))) {
-    throw new AppError('startDate must be in YYYY-MM-DD format when provided.', 400);
+  if (startDate !== undefined && parseFlexibleDateTime(startDate) === null) {
+    throw new AppError('startDate must be a valid date or date-time string when provided.', 400);
   }
 
-  if (endDate !== undefined && (typeof endDate !== 'string' || !isoDatePattern.test(endDate))) {
-    throw new AppError('endDate must be in YYYY-MM-DD format when provided.', 400);
+  if (endDate !== undefined && parseFlexibleDateTime(endDate) === null) {
+    throw new AppError('endDate must be a valid date or date-time string when provided.', 400);
   }
 
   const invalidServiceId = serviceIds.some((serviceId) => !Number.isInteger(serviceId) || serviceId <= 0);
@@ -112,7 +88,6 @@ const createRequest = async (req, res, next) => {
       customerEmail: req.body.customerEmail.trim(),
       accountCount: req.body.accountCount,
       location: req.body.location.trim(),
-      expiryDate: req.body.expiryDate,
       serviceIds: req.body.serviceIds,
       provisionServiceIds: Array.isArray(req.body.provisionServiceIds)
         ? req.body.provisionServiceIds

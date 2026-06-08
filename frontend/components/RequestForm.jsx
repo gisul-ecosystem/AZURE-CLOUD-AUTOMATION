@@ -83,22 +83,24 @@ export default function RequestForm({
           </label>
 
           <label className="field">
-            <span className="field__label">Service Start Date</span>
+            <span className="field__label">Service Start Date and Time</span>
             <input
-              type="date"
+              type="datetime-local"
               name="startDate"
               value={form.startDate}
+              step="60"
               onChange={onFieldChange}
               required
             />
           </label>
 
           <label className="field">
-            <span className="field__label">Service End Date</span>
+            <span className="field__label">Service End Date and Time</span>
             <input
-              type="date"
+              type="datetime-local"
               name="endDate"
               value={form.endDate}
+              step="60"
               onChange={onFieldChange}
               required
             />
@@ -171,19 +173,6 @@ export default function RequestForm({
             </label>
           </div>
         ) : null}
-
-        <div className="surface" style={{ padding: 16 }}>
-          <label className="field">
-            <span className="field__label">Expiry Date</span>
-            <input
-              type="date"
-              name="expiryDate"
-              value={form.expiryDate}
-              onChange={onFieldChange}
-              required
-            />
-          </label>
-        </div>
 
         {error ? <div className="error-box">{error}</div> : null}
 

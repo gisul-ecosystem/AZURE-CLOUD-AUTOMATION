@@ -9,18 +9,24 @@ import { createRequestWithPricing } from '../services/api';
 import useLocations from '../hooks/useLocations';
 import useServicePricing from '../hooks/useServicePricing';
 
-const getInitialExpiry = () => {
-  const date = new Date();
-  date.setDate(date.getDate() + 14);
-  return date.toISOString().slice(0, 10);
-};
+const pad = (value) => String(value).padStart(2, '0');
 
-const getTodayDate = () => new Date().toISOString().slice(0, 10);
+const formatLocalDate = (date) =>
+  [
+    date.getFullYear(),
+    pad(date.getMonth() + 1),
+    pad(date.getDate())
+  ].join('-');
 
-const getDatePlusDays = (days) => {
+const formatLocalDateTime = (date) =>
+  `${formatLocalDate(date)}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+
+const getTodayDateTime = () => formatLocalDateTime(new Date());
+
+const getDateTimePlusDays = (days) => {
   const date = new Date();
   date.setDate(date.getDate() + days);
-  return date.toISOString().slice(0, 10);
+  return formatLocalDateTime(date);
 };
 
 const getPositiveInteger = (value) => {
@@ -43,9 +49,8 @@ export default function RequestWorkspace() {
     customerEmail: '',
     accountCount: '',
     location: '',
-    startDate: getTodayDate(),
-    endDate: getDatePlusDays(30),
-    expiryDate: getInitialExpiry()
+    startDate: getTodayDateTime(),
+    endDate: getDateTimePlusDays(30)
   });
   const [pricing, setPricing] = useState({
     loading: false,
@@ -105,8 +110,8 @@ export default function RequestWorkspace() {
       return { hours: 0, days: 0 };
     }
 
-    const start = Date.parse(`${form.startDate}T00:00:00.000Z`);
-    const end = Date.parse(`${form.endDate}T00:00:00.000Z`);
+    const start = new Date(form.startDate).getTime();
+    const end = new Date(form.endDate).getTime();
 
     if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
       return { hours: 0, days: 0 };
@@ -251,11 +256,6 @@ export default function RequestWorkspace() {
       return;
     }
 
-    if (!form.expiryDate) {
-      setSubmitError('Expiry date is required.');
-      return;
-    }
-
     setSubmitting(true);
 
     try {
@@ -265,7 +265,6 @@ export default function RequestWorkspace() {
         location: form.location,
         startDate: form.startDate,
         endDate: form.endDate,
-        expiryDate: form.expiryDate,
         serviceIds: payload.serviceIds,
         provisionServiceIds
       });
