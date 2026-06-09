@@ -297,6 +297,31 @@ const getAvailableLocations = async (serviceIds) => {
   }));
 };
 
+const getServiceRoles = async (serviceId) => {
+  const resolvedServiceId = Number(serviceId);
+
+  if (!Number.isInteger(resolvedServiceId) || resolvedServiceId <= 0) {
+    return [];
+  }
+
+  const result = await db.query(
+    `
+      SELECT
+        id,
+        azure_role
+      FROM service_role_mapping
+      WHERE service_id = $1
+      ORDER BY azure_role
+    `,
+    [resolvedServiceId]
+  );
+
+  return result.rows.map((row) => ({
+    id: Number(row.id),
+    azure_role: row.azure_role
+  }));
+};
+
 const getActiveServicesWithPricing = async (location) => {
   const resolvedLocation = normalizeLocation(location);
   const cachedPricing = getCachedPricing(resolvedLocation);
@@ -375,6 +400,7 @@ module.exports = {
   getActiveServices,
   getServiceCatalog,
   getAvailableLocations,
+  getServiceRoles,
   getActiveServicesWithPricing,
   getDistinctLocations
 };

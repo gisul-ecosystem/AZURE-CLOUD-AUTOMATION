@@ -1,5 +1,6 @@
 const db = require('../db/postgres');
 const AppError = require('../utils/AppError');
+const { parseFlexibleDateTime } = require('../utils/dateTime');
 
 const DEFAULT_LOCATION = process.env.AZURE_PRICING_DEFAULT_REGION || 'eastus';
 const AZURE_RETAIL_API_BASE = 'https://prices.azure.com/api/retail/prices';
@@ -48,16 +49,18 @@ const fetchAzureRetailItems = async (serviceName, location) => {
 };
 
 const resolvePricingArgs = (payload = {}) => {
-  const startDate = typeof payload.startDate === 'string' && payload.startDate.trim().length > 0
-    ? payload.startDate.trim()
-    : new Date().toISOString().slice(0, 10);
-  const endDate = typeof payload.endDate === 'string' && payload.endDate.trim().length > 0
-    ? payload.endDate.trim()
-    : (() => {
-        const date = new Date();
-        date.setUTCDate(date.getUTCDate() + 30);
-        return date.toISOString().slice(0, 10);
-      })();
+  const startDate =
+    typeof payload.startDate === 'string' && payload.startDate.trim().length > 0
+      ? payload.startDate.trim()
+      : new Date().toISOString().slice(0, 10);
+  const endDate =
+    typeof payload.endDate === 'string' && payload.endDate.trim().length > 0
+      ? payload.endDate.trim()
+      : (() => {
+          const date = new Date();
+          date.setUTCDate(date.getUTCDate() + 30);
+          return date.toISOString().slice(0, 10);
+        })();
   const location =
     typeof payload.location === 'string' && payload.location.trim().length > 0
       ? payload.location.trim()
@@ -144,8 +147,13 @@ const calculatePricing = async ({ accountCount, serviceIds, location, startDate,
       rows
     });
 
-    const start = new Date(startDate);
-    const end = new Date(endDate);
+    const start = parseFlexibleDateTime(startDate);
+    const end = parseFlexibleDateTime(endDate);
+
+    if (!start || !end) {
+      throw new AppError('endDate must be on or after startDate', 400);
+    }
+
     const startTimestamp = start.getTime();
     const endTimestamp = end.getTime();
 

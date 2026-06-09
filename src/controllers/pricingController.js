@@ -1,26 +1,11 @@
 const AppError = require('../utils/AppError');
 const pricingService = require('../services/pricingService');
+const { parseFlexibleDateTime } = require('../utils/dateTime');
 
 const allowedPricingFields = new Set(['accountCount', 'serviceIds', 'location', 'startDate', 'endDate']);
 const DEFAULT_LOCATION = 'eastus';
 const DEFAULT_START_DATE = () => new Date().toISOString().slice(0, 10);
 const DEFAULT_END_DATE = () => new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10);
-
-const isoDatePattern = /^\d{4}-\d{2}-\d{2}$/;
-
-const parseDateValue = (value) => {
-  if (typeof value !== 'string' || !isoDatePattern.test(value)) {
-    return null;
-  }
-
-  const date = new Date(`${value}T00:00:00.000Z`);
-
-  if (Number.isNaN(date.getTime())) {
-    return null;
-  }
-
-  return date;
-};
 
 const validatePricingPayload = (body) => {
   const invalidFields = Object.keys(body).filter((field) => !allowedPricingFields.has(field));
@@ -49,12 +34,12 @@ const validatePricingPayload = (body) => {
     throw new AppError('location must be a non-empty string when provided.', 400);
   }
 
-  if (startDate !== undefined && (typeof startDate !== 'string' || !isoDatePattern.test(startDate))) {
-    throw new AppError('startDate must be in YYYY-MM-DD format when provided.', 400);
+  if (startDate !== undefined && parseFlexibleDateTime(startDate) === null) {
+    throw new AppError('startDate must be a valid date or date-time string when provided.', 400);
   }
 
-  if (endDate !== undefined && (typeof endDate !== 'string' || !isoDatePattern.test(endDate))) {
-    throw new AppError('endDate must be in YYYY-MM-DD format when provided.', 400);
+  if (endDate !== undefined && parseFlexibleDateTime(endDate) === null) {
+    throw new AppError('endDate must be a valid date or date-time string when provided.', 400);
   }
 
   const invalidServiceId = serviceIds.some((serviceId) => !Number.isInteger(serviceId) || serviceId <= 0);
@@ -97,8 +82,8 @@ const calculatePricing = async (req, res, next) => {
       })
     );
 
-    const startDate = parseDateValue(payload.startDate);
-    const endDate = parseDateValue(payload.endDate);
+    const startDate = parseFlexibleDateTime(payload.startDate);
+    const endDate = parseFlexibleDateTime(payload.endDate);
 
     if (!startDate || !endDate || endDate < startDate) {
       throw new AppError('endDate must be on or after startDate', 400);

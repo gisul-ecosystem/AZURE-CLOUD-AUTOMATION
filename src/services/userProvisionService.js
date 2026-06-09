@@ -12,7 +12,7 @@ const STATUS_CREATED = 'Created';
 
 const getRequestByIdForUserProvisioning = async (client, requestId) => {
   const query = `
-    SELECT id, account_count, status
+    SELECT id, account_count, status, expiry_date
     FROM requests
     WHERE id = $1
     FOR UPDATE
@@ -157,19 +157,29 @@ const provisionUsersForRequest = async (requestId) => {
 
 const getUsersForRequest = async (requestId) => {
   const query = `
-    SELECT request_id, azure_user_id, username, status
-    FROM azure_users
-    WHERE request_id = $1
-    ORDER BY username ASC
+    SELECT
+      u.id,
+      u.azure_user_id,
+      u.username,
+      u.status,
+      u.created_at,
+      r.expiry_date
+    FROM azure_users u
+    LEFT JOIN requests r
+      ON r.id = u.request_id
+    WHERE u.request_id = $1
+    ORDER BY u.created_at DESC
   `;
 
   const result = await db.query(query, [requestId]);
 
   return result.rows.map((row) => ({
-    requestId: row.request_id,
+    id: row.id,
     azureUserId: row.azure_user_id,
     username: row.username,
-    status: row.status
+    status: row.status,
+    createdAt: row.created_at,
+    expiryDate: row.expiry_date
   }));
 };
 

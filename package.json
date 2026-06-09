@@ -11,7 +11,10 @@
     "frontend:build": "npm --prefix frontend run build"
   },
   "dependencies": {
+    "@azure/arm-appservice": "^14.1.0",
     "@azure/arm-authorization": "^9.0.0",
+    "@azure/arm-compute": "^21.6.0",
+    "@azure/arm-containerservice": "^19.8.0",
     "@azure/arm-resources": "^7.0.0",
     "@azure/identity": "^4.13.1",
     "@microsoft/microsoft-graph-client": "^3.0.7",
