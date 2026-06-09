@@ -5,15 +5,18 @@ const categoryRoutes = require('./src/routes/categoryRoutes');
 const azureRoutes = require('./src/routes/azureRoutes');
 const adminRoutes = require('./src/routes/adminRoutes');
 const cleanupRoutes = require('./src/routes/cleanupRoutes');
+const accessRoutes = require('./src/routes/accessRoutes');
 const credentialRoutes = require('./src/routes/credentialRoutes');
 const catalogRoutes = require('./src/routes/catalogRoutes');
 const provisionRoutes = require('./src/routes/provisionRoutes');
 const roleProvisionRoutes = require('./src/routes/roleProvisionRoutes');
 const userProvisionRoutes = require('./src/routes/userProvisionRoutes');
 const { startExpiryScheduler } = require('./src/scheduler/expiryScheduler');
+const { startUsageScheduler } = require('./src/scheduler/usageScheduler');
 const pricingRoutes = require('./src/routes/pricingRoutes');
 const servicePricingRoutes = require('./src/routes/servicePricingRoutes');
 const requestRoutes = require('./src/routes/requestRoutes');
+const usageRoutes = require('./src/routes/usageRoutes');
 const serviceRoutes = require('./src/routes/serviceRoutes');
 const AppError = require('./src/utils/AppError');
 const { pool } = require('./src/config/database');
@@ -44,6 +47,8 @@ app.use('/api/categories', categoryRoutes);
 app.use('/api/azure', azureRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/cleanup', cleanupRoutes);
+app.use('/api/access', accessRoutes);
+app.use('/api/manage', accessRoutes);
 app.use('/api', catalogRoutes);
 app.use('/api/provision', credentialRoutes);
 app.use('/api/provision', provisionRoutes);
@@ -54,6 +59,7 @@ console.log('pricing_routes_registered');
 app.use('/api/services/pricing', servicePricingRoutes);
 app.use('/api/requests', requestRoutes);
 app.use('/api/services', serviceRoutes);
+app.use('/api/usage', usageRoutes);
 
 app.all('*', (req, res, next) => {
   next(new AppError(`Route not found: ${req.originalUrl}`, 404));
@@ -78,6 +84,7 @@ let server;
 
 const startServer = () => {
   startExpiryScheduler();
+  startUsageScheduler();
   server = app.listen(port, () => {
     console.log(`Service Catalog API listening on port ${port}`);
   });

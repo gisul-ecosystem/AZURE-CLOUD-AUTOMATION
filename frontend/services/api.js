@@ -88,6 +88,17 @@ export async function getServices(location = '') {
   return payload?.data || payload || [];
 }
 
+export async function getServiceRoles(serviceId) {
+  const resolvedServiceId = Number(serviceId);
+
+  if (!Number.isInteger(resolvedServiceId) || resolvedServiceId <= 0) {
+    return [];
+  }
+
+  const payload = await requestJson(`/api/services/${encodeURIComponent(resolvedServiceId)}/roles`);
+  return payload?.roles || payload?.data || payload || [];
+}
+
 export async function getServiceCatalog() {
   const payload = await requestJson('/api/services/catalog');
   return payload?.services || payload?.data || payload || [];
@@ -190,6 +201,32 @@ export async function sendCredentials(requestId) {
   });
 }
 
+export async function exchangeManageToken(token) {
+  return requestJson(`/api/manage/token?token=${encodeURIComponent(token)}`);
+}
+
+export async function getManageRequest(sessionToken, requestId) {
+  return requestJson(`/api/manage/request/${encodeURIComponent(requestId)}?session=${encodeURIComponent(sessionToken)}`);
+}
+
+export async function deleteManageUser(sessionToken, requestId, userId) {
+  return requestJson(`/api/manage/user/${encodeURIComponent(userId)}?session=${encodeURIComponent(sessionToken)}&requestId=${encodeURIComponent(requestId)}`, {
+    method: 'DELETE'
+  });
+}
+
+export async function updateManageUserRoles(sessionToken, requestId, userId, roles) {
+  return requestJson(`/api/manage/user/${encodeURIComponent(userId)}/roles?session=${encodeURIComponent(sessionToken)}&requestId=${encodeURIComponent(requestId)}`, {
+    method: 'PATCH',
+    body: { roles }
+  });
+}
+
+export const exchangeAccessToken = exchangeManageToken;
+export const getAccessUsers = getManageRequest;
+export const deleteAccessUser = deleteManageUser;
+export const updateAccessUserRoles = updateManageUserRoles;
+
 export async function fetchProvisionSnapshot(requestId) {
   const [request, provision, users, roles, credentials] = await Promise.allSettled([
     getRequestById(requestId),
@@ -221,4 +258,34 @@ export async function createRequestWithPricing(payload) {
     ...response,
     requestId
   };
+}
+
+// Usage tracking APIs
+export async function startUsageSession(requestId, userId) {
+  return requestJson('/api/usage/start', {
+    method: 'POST',
+    body: { requestId, userId }
+  });
+}
+
+export async function endUsageSession(requestId, userId) {
+  return requestJson('/api/usage/end', {
+    method: 'POST',
+    body: { requestId, userId }
+  });
+}
+
+export async function getUsageStatus(requestId, userId) {
+  return requestJson(`/api/usage/status/${encodeURIComponent(requestId)}/${encodeURIComponent(userId)}`);
+}
+
+export async function getActiveSessions() {
+  return requestJson('/api/usage/sessions/active');
+}
+
+export async function forceLogoutUser(requestId, userId) {
+  return requestJson('/api/usage/force-logout', {
+    method: 'POST',
+    body: { requestId, userId }
+  });
 }

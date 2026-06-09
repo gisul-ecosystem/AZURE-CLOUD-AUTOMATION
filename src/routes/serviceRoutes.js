@@ -6,6 +6,7 @@ const router = express.Router();
 router.get('/catalog', serviceController.getCatalogServices);
 router.get('/available-locations', serviceController.getAvailableLocations);
 router.get('/pricing', serviceController.getServicePricing);
+router.get('/:serviceId/roles', serviceController.getServiceRoles);
 router.get('/', serviceController.getServices);
 
 module.exports = router;

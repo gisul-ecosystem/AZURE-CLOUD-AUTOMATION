@@ -175,10 +175,30 @@ const getAvailableLocations = async (req, res, next) => {
   }
 };
 
+const getServiceRoles = async (req, res, next) => {
+  try {
+    const serviceId = Number(req.params.serviceId);
+
+    if (!Number.isInteger(serviceId) || serviceId <= 0) {
+      throw new AppError('serviceId must be a positive integer.', 400);
+    }
+
+    const roles = await serviceService.getServiceRoles(serviceId);
+
+    res.status(200).json({
+      success: true,
+      roles
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   getServices,
   getServicePricing,
   getCatalogServices,
   getLocations,
-  getAvailableLocations
+  getAvailableLocations,
+  getServiceRoles
 };

@@ -72,7 +72,7 @@ export default function DashboardView({ requests = [], error = '', lastUpdated =
               <h2>Provision Azure access with a single guided request.</h2>
               <p>
                 Submit customer details, estimate pricing, create the request, provision the
-                resource group, create users, assign RBAC, send credentials, and expire access on
+                resource group, create users, assign RBAC, send the access link, and expire access on
                 schedule.
               </p>
               <div className="button-row">

@@ -879,6 +879,99 @@ textarea {
   gap: 12px;
 }
 
+.manage-users-table-wrap {
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.manage-users-table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 760px;
+}
+
+.manage-users-table thead th {
+  padding: 14px 16px;
+  text-align: left;
+  font-size: 0.8rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted-strong);
+  border-bottom: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.manage-users-table tbody td {
+  padding: 16px;
+  vertical-align: top;
+  border-top: 1px solid rgba(159, 180, 255, 0.08);
+}
+
+.manage-users-table tbody tr:hover {
+  background: rgba(106, 228, 255, 0.03);
+}
+
+.manage-users-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.manage-users-actions .btn {
+  min-height: 40px;
+  padding: 0 12px;
+  border-radius: 12px;
+  white-space: nowrap;
+}
+
+.manage-users-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.manage-users-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(106, 228, 255, 0.24);
+  background: rgba(106, 228, 255, 0.08);
+  color: #d6f8ff;
+  font-size: 0.78rem;
+}
+
+.manage-users-meta {
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 0.84rem;
+  line-height: 1.5;
+}
+
+.manage-users-empty {
+  padding: 22px 16px;
+  color: var(--muted);
+}
+
+.manage-users-form {
+  display: grid;
+  gap: 12px;
+}
+
+.manage-users-shell .summary-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.manage-notes {
+  margin: 0;
+  padding-left: 20px;
+  color: var(--muted);
+  line-height: 1.7;
+}
+
 .request-row {
   display: grid;
   grid-template-columns: minmax(0, 1.1fr) repeat(4, minmax(0, 0.45fr));
@@ -1032,7 +1125,8 @@ textarea {
   .stat-grid,
   .metrics-grid,
   .success-card__grid,
-  .pricing-summary__meta {
+  .pricing-summary__meta,
+  .manage-users-shell .summary-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
@@ -1061,7 +1155,8 @@ textarea {
   .stat-grid,
   .metrics-grid,
   .success-card__grid,
-  .pricing-summary__meta {
+  .pricing-summary__meta,
+  .manage-users-shell .summary-grid {
     grid-template-columns: 1fr;
   }
 

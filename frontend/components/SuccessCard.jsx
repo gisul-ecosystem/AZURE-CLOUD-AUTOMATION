@@ -22,7 +22,7 @@ export default function SuccessCard({
 
       <p>
         The resource group was created, users were provisioned, RBAC roles were assigned, and
-        credentials were delivered successfully.
+        the access portal link was delivered successfully.
       </p>
 
       <div className="success-card__grid">
@@ -43,7 +43,7 @@ export default function SuccessCard({
           <strong>{rolesAssigned}</strong>
         </div>
         <div className="summary-card">
-          <span>Credential Status</span>
+          <span>Access Link Status</span>
           <strong>{deliveryStatus}</strong>
         </div>
         <div className="summary-card">
@@ -54,7 +54,7 @@ export default function SuccessCard({
 
       {customerEmail ? (
         <div className="notice">
-          Credentials were delivered to <strong>{customerEmail}</strong>.
+          The access portal link was delivered to <strong>{customerEmail}</strong>.
         </div>
       ) : null}
 

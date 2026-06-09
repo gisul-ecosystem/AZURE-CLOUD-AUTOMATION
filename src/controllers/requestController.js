@@ -1,22 +1,35 @@
 const AppError = require('../utils/AppError');
 const requestService = require('../services/requestService');
+const { parseFlexibleDateTime } = require('../utils/dateTime');
 
 const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-const isoDatePattern = /^\d{4}-\d{2}-\d{2}$/;
 const allowedRequestFields = new Set([
   'customerEmail',
   'accountCount',
   'location',
-  'expiryDate',
   'serviceIds',
+  'selectedRoles',
   'provisionServiceIds',
   'startDate',
-  'endDate'
+  'endDate',
+  'enableDailyUsage',
+  'dailyLimitMinutes'
 ]);
 
 const validateRequestPayload = (body) => {
   const invalidFields = Object.keys(body).filter((field) => !allowedRequestFields.has(field));
-  const { customerEmail, accountCount, location, expiryDate, serviceIds, provisionServiceIds, startDate, endDate } = body;
+  const {
+    customerEmail,
+    accountCount,
+    location,
+    serviceIds,
+    selectedRoles,
+    provisionServiceIds,
+    startDate,
+    endDate,
+    enableDailyUsage,
+    dailyLimitMinutes
+  } = body;
 
   if (invalidFields.length > 0) {
     throw new AppError(`Invalid field(s): ${invalidFields.join(', ')}`, 400);
@@ -34,39 +47,30 @@ const validateRequestPayload = (body) => {
     throw new AppError('location must be a non-empty string.', 400);
   }
 
-  if (typeof expiryDate !== 'string' || !isoDatePattern.test(expiryDate)) {
-    throw new AppError('expiryDate must be in YYYY-MM-DD format.', 400);
-  }
-
-  const [year, month, day] = expiryDate.split('-').map(Number);
-  const parsedExpiryDate = new Date(Date.UTC(year, month - 1, day));
-
-  if (
-    Number.isNaN(parsedExpiryDate.getTime()) ||
-    parsedExpiryDate.getUTCFullYear() !== year ||
-    parsedExpiryDate.getUTCMonth() !== month - 1 ||
-    parsedExpiryDate.getUTCDate() !== day
-  ) {
-    throw new AppError('expiryDate must be a valid calendar date.', 400);
-  }
-
-  const today = new Date();
-  today.setUTCHours(0, 0, 0, 0);
-
-  if (parsedExpiryDate < today) {
-    throw new AppError('expiryDate cannot be in the past.', 400);
-  }
-
   if (!Array.isArray(serviceIds) || serviceIds.length === 0) {
     throw new AppError('serviceIds must be a non-empty array.', 400);
   }
 
-  if (startDate !== undefined && (typeof startDate !== 'string' || !isoDatePattern.test(startDate))) {
-    throw new AppError('startDate must be in YYYY-MM-DD format when provided.', 400);
+  if (startDate !== undefined && parseFlexibleDateTime(startDate) === null) {
+    throw new AppError('startDate must be a valid date or date-time string when provided.', 400);
   }
 
-  if (endDate !== undefined && (typeof endDate !== 'string' || !isoDatePattern.test(endDate))) {
-    throw new AppError('endDate must be in YYYY-MM-DD format when provided.', 400);
+  if (endDate !== undefined && parseFlexibleDateTime(endDate) === null) {
+    throw new AppError('endDate must be a valid date or date-time string when provided.', 400);
+  }
+
+  if (enableDailyUsage !== undefined && typeof enableDailyUsage !== 'boolean') {
+    throw new AppError('enableDailyUsage must be a boolean when provided.', 400);
+  }
+
+  if (dailyLimitMinutes !== undefined) {
+    if (!Number.isInteger(dailyLimitMinutes) || dailyLimitMinutes <= 0) {
+      throw new AppError('dailyLimitMinutes must be a positive integer when provided.', 400);
+    }
+  }
+
+  if (enableDailyUsage === true && !dailyLimitMinutes) {
+    throw new AppError('dailyLimitMinutes is required when enableDailyUsage is true.', 400);
   }
 
   const invalidServiceId = serviceIds.some((serviceId) => !Number.isInteger(serviceId) || serviceId <= 0);
@@ -77,6 +81,29 @@ const validateRequestPayload = (body) => {
 
   if (new Set(serviceIds).size !== serviceIds.length) {
     throw new AppError('serviceIds must not contain duplicates.', 400);
+  }
+
+  if (!Array.isArray(selectedRoles) || selectedRoles.length === 0) {
+    throw new AppError('selectedRoles must be a non-empty array.', 400);
+  }
+
+  for (const entry of selectedRoles) {
+    if (!entry || typeof entry !== 'object') {
+      throw new AppError('selectedRoles must contain service role objects.', 400);
+    }
+
+    if (!Number.isInteger(entry.serviceId) || entry.serviceId <= 0) {
+      throw new AppError('selectedRoles.serviceId must be a positive integer.', 400);
+    }
+
+    if (!Array.isArray(entry.roles) || entry.roles.length === 0) {
+      throw new AppError('selectedRoles.roles must be a non-empty array.', 400);
+    }
+
+    const invalidRole = entry.roles.some((role) => typeof role !== 'string' || role.trim().length === 0);
+    if (invalidRole) {
+      throw new AppError('selectedRoles.roles must contain non-empty strings.', 400);
+    }
   }
 
   if (provisionServiceIds !== undefined) {
@@ -112,13 +139,17 @@ const createRequest = async (req, res, next) => {
       customerEmail: req.body.customerEmail.trim(),
       accountCount: req.body.accountCount,
       location: req.body.location.trim(),
-      expiryDate: req.body.expiryDate,
       serviceIds: req.body.serviceIds,
+      selectedRoles: req.body.selectedRoles,
       provisionServiceIds: Array.isArray(req.body.provisionServiceIds)
         ? req.body.provisionServiceIds
         : undefined,
       startDate: req.body.startDate,
-      endDate: req.body.endDate
+      endDate: req.body.endDate,
+      enableDailyUsage: req.body.enableDailyUsage === true,
+      dailyLimitMinutes: req.body.dailyLimitMinutes
+        ? Number(req.body.dailyLimitMinutes)
+        : undefined
     };
 
     const result = await requestService.createRequest(payload);

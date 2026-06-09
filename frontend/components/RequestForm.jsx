@@ -28,6 +28,8 @@ export default function RequestForm({
   serviceGroups = [],
   services = [],
   selectedServiceIds = [],
+  selectedServiceRoleEntries = [],
+  onToggleServiceRole,
   onFieldChange,
   onSelectionChange,
   onSubmit,
@@ -83,26 +85,70 @@ export default function RequestForm({
           </label>
 
           <label className="field">
-            <span className="field__label">Service Start Date</span>
+            <span className="field__label">Service Start Date and Time</span>
             <input
-              type="date"
+              type="datetime-local"
               name="startDate"
               value={form.startDate}
+              step="60"
               onChange={onFieldChange}
               required
             />
           </label>
 
           <label className="field">
-            <span className="field__label">Service End Date</span>
+            <span className="field__label">Service End Date and Time</span>
             <input
-              type="date"
+              type="datetime-local"
               name="endDate"
               value={form.endDate}
+              step="60"
               onChange={onFieldChange}
               required
             />
           </label>
+        </div>
+
+        <div className="surface" style={{ padding: 16, marginTop: 16 }}>
+          <div className="panel__heading" style={{ marginBottom: 14 }}>
+            <div>
+              <h3>Daily Usage Limits</h3>
+              <p>Configure optional daily usage restrictions for provisioned access.</p>
+            </div>
+          </div>
+
+          <div className="form-grid">
+            <label className="field" style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+              <input
+                type="checkbox"
+                name="enableDailyUsage"
+                checked={form.enableDailyUsage || false}
+                onChange={(e) => onFieldChange({ target: { name: 'enableDailyUsage', value: e.target.checked } })}
+              />
+              <span className="field__label" style={{ margin: 0 }}>
+                Enable Daily Usage Limit
+              </span>
+            </label>
+
+            {form.enableDailyUsage && (
+              <label className="field">
+                <span className="field__label">Daily Usage Limit (hours)</span>
+                <input
+                  type="number"
+                  name="dailyLimitHours"
+                  min="0.5"
+                  step="0.5"
+                  value={form.dailyLimitHours || ''}
+                  onChange={onFieldChange}
+                  placeholder="2"
+                  required={form.enableDailyUsage}
+                />
+                <span className="inline-note">
+                  Users can access provisioned resources for this many hours per day during the service period.
+                </span>
+              </label>
+            )}
+          </div>
         </div>
 
         <div className="surface" style={{ padding: 16 }}>
@@ -129,6 +175,65 @@ export default function RequestForm({
             Some services may not support automated provisioning.
           </p>
         </div>
+
+        {selectedServiceRoleEntries.length > 0 ? (
+          <div className="surface" style={{ padding: 16 }}>
+            <div className="panel__heading" style={{ marginBottom: 14 }}>
+              <div>
+                <h3>Roles</h3>
+                <p>Select one or more Azure RBAC roles for each chosen service.</p>
+              </div>
+              <span className="helper-badge">
+                {selectedServiceRoleEntries.reduce((count, entry) => count + entry.selectedRoles.length, 0)} selected
+              </span>
+            </div>
+
+            <div className="step-stack">
+              {selectedServiceRoleEntries.map((entry) => (
+                <div key={entry.backendServiceId || entry.catalogServiceId} className="surface" style={{ padding: 16 }}>
+                  <div className="panel__heading" style={{ marginBottom: 12 }}>
+                    <div>
+                      <h4 style={{ marginBottom: 4 }}>{entry.name}</h4>
+                      <p>Selected service</p>
+                    </div>
+                    <span className="helper-badge">
+                      {entry.selectedRoles.length > 0 ? `${entry.selectedRoles.length} selected` : 'No roles selected'}
+                    </span>
+                  </div>
+
+                  {entry.loading ? (
+                    <p className="inline-note">Loading role mappings...</p>
+                  ) : entry.backendServiceId ? (
+                    entry.availableRoles.length > 0 ? (
+                      <div className="step-stack" style={{ gap: 10 }}>
+                        {entry.availableRoles.map((role) => {
+                          const checked = entry.selectedRoles.includes(role.azure_role);
+
+                          return (
+                            <label key={role.id} className="field" style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+                              <input
+                                type="checkbox"
+                                checked={checked}
+                                onChange={() => onToggleServiceRole?.(entry.backendServiceId, role.azure_role)}
+                              />
+                              <span className="field__label" style={{ margin: 0 }}>
+                                {role.azure_role}
+                              </span>
+                            </label>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <p className="inline-note">No role mappings are configured for this service.</p>
+                    )
+                  ) : (
+                    <p className="inline-note">This selected service does not map to a provisionable backend service.</p>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : null}
 
         {selectedServiceIds.length > 0 ? (
           <div className="surface" style={{ padding: 16 }}>
@@ -171,19 +276,6 @@ export default function RequestForm({
             </label>
           </div>
         ) : null}
-
-        <div className="surface" style={{ padding: 16 }}>
-          <label className="field">
-            <span className="field__label">Expiry Date</span>
-            <input
-              type="date"
-              name="expiryDate"
-              value={form.expiryDate}
-              onChange={onFieldChange}
-              required
-            />
-          </label>
-        </div>
 
         {error ? <div className="error-box">{error}</div> : null}
 
