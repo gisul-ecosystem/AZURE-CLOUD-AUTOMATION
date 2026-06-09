@@ -72,68 +72,6 @@ const escapeHtml = (value) =>
     .replaceAll('"', '&quot;')
     .replaceAll("'", '&#39;');
 
-const buildCredentialEmailHtml = ({ requestId, users, portalLink, expiresAt }) => {
-  const rowsHtml = users
-    .map(
-      (user, index) => `
-        <tr>
-          <td style="border-bottom: 1px solid #e5e7eb; padding: 12px 10px;">${index + 1}</td>
-          <td style="border-bottom: 1px solid #e5e7eb; padding: 12px 10px;">${escapeHtml(user.username)}</td>
-          <td style="border-bottom: 1px solid #e5e7eb; padding: 12px 10px;">${escapeHtml(user.temporary_password)}</td>
-          <td style="border-bottom: 1px solid #e5e7eb; padding: 12px 10px;">${escapeHtml(user.azure_user_id)}</td>
-          <td style="border-bottom: 1px solid #e5e7eb; padding: 12px 10px;">${escapeHtml(user.status || 'active')}</td>
-        </tr>
-      `
-    )
-    .join('');
-
-  return `
-    <!doctype html>
-    <html>
-      <body style="font-family: Arial, Helvetica, sans-serif; color: #111827; background: #f8fafc; margin: 0; padding: 24px;">
-        <div style="max-width: 760px; margin: 0 auto; background: #ffffff; border: 1px solid #e5e7eb; border-radius: 16px; padding: 28px;">
-          <h1 style="margin: 0 0 8px; font-size: 26px; line-height: 1.2;">Your Azure Access Portal</h1>
-          <p style="margin: 0 0 20px; font-size: 16px; color: #374151;">Provisioning completed for request <strong>#${escapeHtml(requestId)}</strong>.</p>
-          <div style="overflow-x: auto;">
-          <table style="border-collapse: collapse; width: 100%; min-width: 680px; border: 1px solid #e5e7eb; border-radius: 12px;">
-            <thead>
-              <tr>
-                <th style="border-bottom: 1px solid #d1d5db; text-align: left; padding: 12px 10px; background: #f9fafb; font-size: 13px; text-transform: uppercase; letter-spacing: 0.04em;">#</th>
-                <th style="border-bottom: 1px solid #d1d5db; text-align: left; padding: 12px 10px; background: #f9fafb; font-size: 13px; text-transform: uppercase; letter-spacing: 0.04em;">Username</th>
-                <th style="border-bottom: 1px solid #d1d5db; text-align: left; padding: 12px 10px; background: #f9fafb; font-size: 13px; text-transform: uppercase; letter-spacing: 0.04em;">Temporary Password</th>
-                <th style="border-bottom: 1px solid #d1d5db; text-align: left; padding: 12px 10px; background: #f9fafb; font-size: 13px; text-transform: uppercase; letter-spacing: 0.04em;">Azure User ID</th>
-                <th style="border-bottom: 1px solid #d1d5db; text-align: left; padding: 12px 10px; background: #f9fafb; font-size: 13px; text-transform: uppercase; letter-spacing: 0.04em;">Status</th>
-              </tr>
-            </thead>
-            <tbody>
-              ${rowsHtml}
-            </tbody>
-          </table>
-          </div>
-          <div style="margin-top: 24px; padding: 20px; border: 1px solid #e5e7eb; border-radius: 14px; background: #f9fafb;">
-            <p style="margin: 0 0 12px; font-size: 14px; font-weight: 700; color: #374151;">Manage Users</p>
-            <a
-              href="${escapeHtml(portalLink)}"
-              style="display: inline-block; background: #111827; color: #ffffff; text-decoration: none; padding: 12px 18px; border-radius: 10px; font-weight: 700;"
-            >
-              Manage Access
-            </a>
-            <p style="margin: 14px 0 0; font-size: 14px; word-break: break-all;">
-              <a href="${escapeHtml(portalLink)}" style="color: #2563eb;">${escapeHtml(portalLink)}</a>
-            </p>
-          </div>
-          <p style="margin: 18px 0 0; font-size: 13px; color: #6b7280;">
-            This secure link expires in 7 days.
-          </p>
-          <p style="margin: 8px 0 0; font-size: 13px; color: #6b7280;">
-            Keep credentials confidential.
-          </p>
-        </div>
-      </body>
-    </html>
-  `;
-};
-
 const buildAccessPortalEmailHtml = ({ requestId, manageUrl, expiresAt }) => `
   <!doctype html>
   <html>
@@ -163,7 +101,7 @@ const isRetryableEmailError = (error) => {
   );
 };
 
-const sendCredentialEmailWithRetry = async ({ to, subject, html }) => {
+const sendAccessPortalEmailWithRetry = async ({ to, subject, html }) => {
   const { transporter, from } = createSmtpTransport();
   let lastError;
 
@@ -190,7 +128,6 @@ const sendCredentialEmailWithRetry = async ({ to, subject, html }) => {
 };
 
 module.exports = {
-  buildCredentialEmailHtml,
   buildAccessPortalEmailHtml,
-  sendCredentialEmailWithRetry
+  sendAccessPortalEmailWithRetry
 };

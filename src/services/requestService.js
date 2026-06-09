@@ -1,3 +1,4 @@
+
 const db = require('../db/postgres');
 const pricingService = require('./pricingService');
 
@@ -6,306 +7,554 @@ async function createRequest({
   accountCount,
   location,
   serviceIds,
-  provisionServiceIds,
+  selectedRoles,
   startDate,
-  endDate
+  endDate,
+  enableDailyUsage,
+  dailyLimitMinutes
 }) {
+
   const client = await db.connect();
 
   try {
+
     await client.query('BEGIN');
 
-    // ------------------------------------------------
-    // STEP 1 — Catalog IDs → Catalog service names
-    // ------------------------------------------------
+    // ==========================
+    // Resolve incoming serviceIds
+    // Supports:
+    // services.id
+    // service_locations.id
+    // ==========================
 
-    const selectedCatalogIds =
+    const incomingIds =
       Array.isArray(serviceIds)
-        ? serviceIds.map(Number).filter(Boolean)
+        ? serviceIds
+            .map(Number)
+            .filter(Boolean)
         : [];
 
-    if (!selectedCatalogIds.length) {
-      throw new Error('No services selected');
+    if (!incomingIds.length) {
+      throw new Error(
+        'No services selected'
+      );
     }
 
-    const catalogResult = await client.query(
-      `
-      SELECT
-        id,
-        service_name
-      FROM service_locations
-      WHERE id = ANY($1)
-      `,
-      [selectedCatalogIds]
-    );
+    let validServiceIds = [];
 
-    console.log(
-      'CATALOG_ROWS',
-      catalogResult.rows
-    );
 
-    if (!catalogResult.rows.length) {
-      throw new Error('Selected catalog services not found');
-    }
 
-    // ------------------------------------------------
-    // STEP 2 — Service names → services.id
-    // ------------------------------------------------
+    // ---------------------------------
+    // TRY DIRECT services.id
+    // ---------------------------------
 
-    const catalogNames =
-      catalogResult.rows
-        .map((r) =>
-          String(r.service_name || '')
-            .trim()
-            .toLowerCase()
-        )
-        .filter(Boolean);
-
-    const serviceLookup =
+    const direct =
       await client.query(
         `
         SELECT
           id,
           name
         FROM services
-        WHERE LOWER(TRIM(name))
-        = ANY($1)
-        ORDER BY id
+        WHERE id = ANY($1)
         `,
-        [catalogNames]
+        [incomingIds]
       );
 
-    const validServiceIds =
-      [
-        ...new Set(
-          serviceLookup.rows.map(
-            (r) => Number(r.id)
+
+
+    if (direct.rows.length) {
+
+      validServiceIds =
+        direct.rows.map(
+          x =>
+            Number(
+              x.id
+            )
+        );
+
+    }
+
+    else {
+
+      // ---------------------------------
+      // FALLBACK service_locations
+      // ---------------------------------
+
+      const catalog =
+        await client.query(
+          `
+          SELECT
+            service_name
+          FROM service_locations
+          WHERE id = ANY($1)
+          `,
+          [incomingIds]
+        );
+
+
+
+      if (!catalog.rows.length) {
+        throw new Error(
+          'Selected services not found'
+        );
+      }
+
+
+
+      const names =
+        [
+          ...new Set(
+
+            catalog.rows.map(
+              x =>
+
+                String(
+                  x.service_name
+                )
+
+                  .trim()
+
+                  .toLowerCase()
+
+            )
+
           )
-        )
-      ];
+        ];
 
-    console.log({
-      catalogIds: selectedCatalogIds,
-      catalogNames,
-      resolvedServices: serviceLookup.rows,
-      validServiceIds
-    });
 
-    if (!validServiceIds.length) {
+
+      const lookup =
+        await client.query(
+          `
+          SELECT
+            id,
+            name
+          FROM services
+          WHERE
+          LOWER(
+            TRIM(name)
+          )
+          =
+          ANY($1)
+          `,
+          [names]
+        );
+
+
+
+      validServiceIds =
+        lookup.rows.map(
+          x =>
+            Number(
+              x.id
+            )
+        );
+
+    }
+
+
+
+    if (
+      !validServiceIds.length
+    ) {
       throw new Error(
-        `No matching services found for: ${catalogNames.join(', ')}`
+        'No services resolved'
       );
     }
 
-    // ------------------------------------------------
-    // STEP 3 — Pricing
-    // ------------------------------------------------
+
+
+    // ==========================
+    // Pricing
+    // ==========================
 
     const pricing =
-      await pricingService.calculatePricing({
-        accountCount,
-        serviceIds: validServiceIds,
-        location,
-        startDate,
-        endDate,
-        client
-      });
+      await pricingService
+        .calculatePricing({
+
+          accountCount,
+
+          location,
+
+          startDate,
+
+          endDate,
+
+          serviceIds:
+            validServiceIds,
+
+          client
+
+        });
+
+
 
     const estimatedPrice =
-      pricing.estimatedPrice ??
-      pricing.totalPrice ??
-      0;
+      Number(
 
-    // ------------------------------------------------
-    // STEP 4 — Create request
-    // ------------------------------------------------
+        pricing
+          .estimatedPrice
 
-    const requestResult =
+        ??
+
+        pricing
+          .totalPrice
+
+        ??
+
+        0
+
+      );
+
+
+
+    // ==========================
+    // Create Request
+    // ==========================
+
+    const request =
       await client.query(
         `
-        INSERT INTO requests
-        (
+        INSERT INTO requests(
+
           customer_email,
+
           account_count,
+
           location,
+
           expiry_date,
+
           estimated_price,
-          status
+
+          status,
+
+          enable_daily_usage,
+
+          daily_limit_minutes
+
         )
-        VALUES
-        (
+
+        VALUES(
+
           $1,
           $2,
           $3,
           $4,
           $5,
-          $6
+          $6,
+          $7,
+          $8
+
         )
+
         RETURNING
         id,
         estimated_price
         `,
         [
+
           customerEmail,
+
           accountCount,
+
           location,
+
           endDate,
+
           estimatedPrice,
-          'Pending'
+
+          'Pending',
+
+          enableDailyUsage === true,
+
+          enableDailyUsage === true && dailyLimitMinutes ? Number(dailyLimitMinutes) : null
+
         ]
       );
 
-    const createdRequest =
-      requestResult.rows[0];
 
-    // ------------------------------------------------
-    // STEP 5 — Insert request services
-    // ------------------------------------------------
 
-    for (const sid of validServiceIds) {
+    const requestId =
+      request.rows[0].id;
 
-      const exists =
-        await client.query(
-          `
-          SELECT id
-          FROM services
-          WHERE id=$1
-          `,
-          [sid]
-        );
 
-      if (!exists.rowCount) {
-        console.log(
-          'SKIP_INVALID_SERVICE',
-          sid
-        );
-        continue;
-      }
 
-      console.log(
-        'INSERT_SERVICE',
-        createdRequest.id,
-        sid
-      );
+    // ==========================
+    // Insert request_services
+    // ==========================
+
+    for (
+      const sid
+      of validServiceIds
+    ) {
 
       await client.query(
         `
-        INSERT INTO request_services
+        INSERT INTO request_services(
+
+          request_id,
+
+          service_id
+
+        )
+
+        VALUES(
+
+          $1,
+
+          $2
+
+        )
+
+        ON CONFLICT
         (
           request_id,
           service_id
         )
-        VALUES
-        (
-          $1,
-          $2
-        )
+
+        DO NOTHING
         `,
         [
-          createdRequest.id,
+
+          requestId,
+
           sid
+
         ]
       );
+
     }
 
-    await client.query('COMMIT');
+
+
+    // ==========================
+    // Save Selected Roles
+    // ==========================
+
+    for (
+      const item
+      of (
+        selectedRoles
+        ||
+        []
+      )
+    ) {
+
+      const sid =
+        Number(
+          item.serviceId
+        );
+
+      if (
+        !validServiceIds
+          .includes(
+            sid
+          )
+      ) {
+        continue;
+      }
+
+      const roles =
+        Array.isArray(
+          item.roles
+        )
+          ? item.roles
+          : [];
+
+
+
+      for (
+        const role
+        of roles
+      ) {
+
+        await client.query(
+          `
+          INSERT INTO request_service_roles(
+
+            request_id,
+
+            service_id,
+
+            azure_role
+
+          )
+
+          VALUES(
+
+            $1,
+
+            $2,
+
+            $3
+
+          )
+
+          ON CONFLICT
+          (
+            request_id,
+            service_id,
+            azure_role
+          )
+
+          DO NOTHING
+          `,
+          [
+
+            requestId,
+
+            sid,
+
+            role
+
+          ]
+        );
+
+      }
+
+    }
+
+
+
+    await client.query(
+      'COMMIT'
+    );
+
+
 
     return {
-      success: true,
-      requestId: createdRequest.id,
-      estimatedPrice:
-        Number(
-          createdRequest.estimated_price
-        )
+
+      success:
+      true,
+
+      requestId,
+
+      estimatedPrice
+
     };
 
-  } catch (error) {
 
-    await client.query('ROLLBACK');
 
-    console.error(
-      'REQUEST_CREATE_ERROR',
-      error
+  }
+
+  catch(error){
+
+    await client.query(
+      'ROLLBACK'
     );
 
     throw error;
 
-  } finally {
+  }
+
+  finally {
 
     client.release();
 
   }
-}
-
-async function getAllRequests() {
-
-  const result =
-    await db.query(
-      `
-      SELECT
-        id,
-        customer_email,
-        account_count,
-        location,
-        expiry_date,
-        estimated_price,
-        status,
-        created_at,
-        expired,
-        cleanup_completed
-      FROM requests
-      ORDER BY created_at DESC
-      `
-    );
-
-  return result.rows;
 
 }
+
+
+
+async function getAllRequests(){
+
+const result =
+await db.query(
+`
+SELECT *
+FROM requests
+ORDER BY created_at DESC
+`
+);
+
+return result.rows;
+
+}
+
+
 
 async function getRequestById(
-  requestId
-) {
+requestId
+){
 
-  const request =
-    await db.query(
-      `
-      SELECT *
-      FROM requests
-      WHERE id=$1
-      `,
-      [requestId]
-    );
+const request =
+await db.query(
+`
+SELECT *
+FROM requests
+WHERE id=$1
+`,
+[
+requestId
+]
+);
 
-  if (
-    !request.rows.length
-  ) {
-    return null;
-  }
 
-  const services =
-    await db.query(
-      `
-      SELECT
-        s.id,
-        s.name,
-        s.price_per_user
-      FROM request_services rs
-      JOIN services s
-      ON s.id=rs.service_id
-      WHERE rs.request_id=$1
-      `,
-      [requestId]
-    );
 
-  return {
-    ...request.rows[0],
-    services: services.rows
-  };
+if(
+!request.rows.length
+){
+
+return null;
 
 }
 
-module.exports = {
-  createRequest,
-  getAllRequests,
-  getRequestById
+
+
+const services =
+await db.query(
+`
+SELECT
+
+s.id,
+
+s.name,
+
+rsr.azure_role
+
+FROM request_services rs
+
+LEFT JOIN services s
+
+ON s.id=rs.service_id
+
+LEFT JOIN request_service_roles rsr
+
+ON rsr.service_id=s.id
+
+AND rsr.request_id=rs.request_id
+
+WHERE rs.request_id=$1
+`,
+[
+requestId
+]
+);
+
+
+
+return{
+
+...request.rows[0],
+
+services:
+services.rows
+
 };
+
+}
+
+
+
+module.exports={
+
+createRequest,
+
+getAllRequests,
+
+getRequestById
+
+};
+

@@ -1,0 +1,278 @@
+FORCED LOGOUT ON LIMIT REACHED - IMPLEMENTATION SUMMARY
+======================================================
+
+REQUIREMENT
+-----------
+When user reaches daily_limit_minutes:
+1. Immediately force logout from Azure
+2. Block all future login attempts
+3. Keep blocked until automatic reset at midnight
+
+IMPLEMENTATION
+--------------
+
+1. SESSION END - Force Logout Other Sessions
+   Location: src/services/usageService.js
+   Function: endUsageSession()
+   
+   When limit reached:
+   - End the current session
+   - Force logout ALL other active sessions for this user
+   - Set blocked_until = tomorrow midnight
+   - Trigger Azure enforcement (revoke access)
+   - Return forcedLogout: true
+   
+   SQL:
+   UPDATE user_usage_sessions
+   SET logout_at = NOW(), minutes_used = EXTRACT(EPOCH FROM (NOW() - login_at)) / 60
+   WHERE request_id = X AND user_id = Y AND logout_at IS NULL
+
+2. ACTIVE SESSION MONITOR - Auto Force Logout
+   Location: src/scheduler/usageScheduler.js
+   Function: monitorActiveSessions()
+   
+   Runs: Every minute
+   
+   For each active session:
+   - Calculate: totalMinutes = usedTodayMinutes + currentSessionMinutes
+   - If totalMinutes >= dailyLimitMinutes:
+     - Force end the session (set logout_at = NOW)
+     - Update used_today_minutes
+     - Set blocked_until = tomorrow midnight
+     - Trigger Azure enforcement
+     - Log [FORCE_LOGOUT]
+   
+   This ensures users are logged out even if they don't manually end session.
+
+3. AZURE ENFORCEMENT - Revoke Access
+   Location: src/services/usageEnforcementService.js
+   Function: enforceUsageLimit()
+   
+   Actions:
+   - Revoke Azure RBAC role assignments
+   - Stop Azure resources (VMs, AKS, App Services)
+   - Log action as 'limit_exceeded_forced_logout'
+   - User account preserved (not deleted)
+
+4. VALIDATEUSERACCESS - Block Future Logins
+   Location: src/middleware/usageMiddleware.js
+   Function: validateUserAccess()
+   
+   Checks before allowing access:
+   - If blocked_until > NOW → 403 Forbidden
+   - If used_today_minutes >= daily_limit_minutes → 403 Forbidden
+   - Sets blocked_until = tomorrow if not already set
+   
+   Applied to ALL protected routes:
+   - POST /api/usage/start
+   - POST /api/provision/request/:id
+   - GET /api/provision/request/:id/credentials
+   - All /api/manage routes
+
+FLOW DIAGRAM
+------------
+
+User Session Active (60/60 minutes used)
+  ↓
+[Option A] User manually ends session
+  ↓
+endUsageSession() called
+  ↓
+Calculate: used_today_minutes = 60
+  ↓
+Limit reached: 60 >= 60
+  ↓
+Force logout ALL active sessions
+  ↓
+Set blocked_until = tomorrow
+  ↓
+Trigger Azure enforcement
+  ↓
+User CANNOT login until midnight reset
+
+[Option B] User keeps session active
+  ↓
+Active session monitor runs (every minute)
+  ↓
+Calculate: total = 55 + 5 = 60 minutes
+  ↓
+Limit reached: 60 >= 60
+  ↓
+Force end session (set logout_at = NOW)
+  ↓
+Update used_today_minutes = 60
+  ↓
+Set blocked_until = tomorrow
+  ↓
+Trigger Azure enforcement
+  ↓
+User logged out from Azure
+  ↓
+User CANNOT login until midnight reset
+
+AUTOMATIC RESET
+  ↓
+Scheduler runs at 00:00 (midnight)
+  ↓
+Reset: used_today_minutes = 0
+  ↓
+Clear: blocked_until = NULL
+  ↓
+User can login again
+
+LOGS TO MONITOR
+---------------
+
+When limit reached during session end:
+[SESSION_ENDED] User 130 total usage: 60/60 minutes
+[LIMIT_REACHED] User 130 exceeded limit. Blocking and forcing logout.
+[LIMIT_REACHED] Forced logout of 2 other active session(s)
+[ENFORCEMENT] Access revoked and user 130 forced logout. User account preserved.
+
+When limit reached during active session:
+[LIMIT_REACHED] Session 1 for user 130 exceeded limit. Total: 60 min, Limit: 60 min
+[FORCE_LOGOUT] Ending session 1 for user 130
+[FORCE_LOGOUT] User 130 logged out. Blocked until tomorrow.
+[ENFORCEMENT] Access revoked and user 130 forced logout. User account preserved.
+
+When user tries to login after limit:
+[LOGIN_BLOCKED] User 130 denied - blocked until 2026-06-10T00:00:00Z
+[LOGIN_BLOCKED] User 130 denied - daily limit exceeded
+
+At midnight reset:
+[USAGE_RESET] Resetting daily counters for user 130
+[ACCESS_RESTORED] User 130 access restored after daily reset
+
+TESTING
+-------
+
+Test 1: Manual Session End
+```bash
+# Start session
+curl -X POST http://localhost:3000/api/usage/start \
+  -H "Content-Type: application/json" \
+  -d '{"requestId": 44, "userId": 130}'
+
+# Set user at limit
+UPDATE azure_users SET used_today_minutes = 
+  (SELECT daily_limit_minutes FROM requests WHERE id = 44)
+WHERE id = 130;
+
+# End session (should force logout)
+curl -X POST http://localhost:3000/api/usage/end \
+  -H "Content-Type: application/json" \
+  -d '{"requestId": 44, "userId": 130}'
+
+# Expected response:
+{
+  "limitExceeded": true,
+  "forcedLogout": true,
+  "message": "All active sessions terminated. Access is blocked until tomorrow."
+}
+
+# Try to start new session (should be blocked)
+curl -X POST http://localhost:3000/api/usage/start \
+  -H "Content-Type: application/json" \
+  -d '{"requestId": 44, "userId": 130}'
+
+# Expected: 403 Forbidden
+```
+
+Test 2: Auto Force Logout by Monitor
+```bash
+# Start session
+curl -X POST http://localhost:3000/api/usage/start \
+  -H "Content-Type: application/json" \
+  -d '{"requestId": 44, "userId": 130}'
+
+# Set user close to limit
+UPDATE azure_users SET used_today_minutes = 59
+WHERE id = 130 AND request_id = 44;
+
+# Wait 2 minutes for monitor to run
+# Monitor will detect: 59 + 2 = 61 >= 60
+# Session will be automatically ended
+
+# Check logs:
+[FORCE_LOGOUT] Ending session X for user 130
+[FORCE_LOGOUT] User 130 logged out. Blocked until tomorrow.
+
+# Try to start new session (should be blocked)
+curl -X POST http://localhost:3000/api/usage/start \
+  -H "Content-Type: application/json" \
+  -d '{"requestId": 44, "userId": 130}'
+
+# Expected: 403 Forbidden
+```
+
+VERIFICATION QUERIES
+--------------------
+
+Check blocked users:
+```sql
+SELECT 
+  au.id,
+  au.used_today_minutes,
+  r.daily_limit_minutes,
+  au.blocked_until,
+  CASE 
+    WHEN au.blocked_until > NOW() THEN 'BLOCKED'
+    ELSE 'ACTIVE'
+  END as status
+FROM azure_users au
+JOIN requests r ON r.id = au.request_id
+WHERE au.id = 130;
+```
+
+Check enforcement logs:
+```sql
+SELECT * FROM usage_enforcement_logs
+WHERE user_id = 130
+  AND action LIKE '%forced_logout%'
+ORDER BY created_at DESC;
+```
+
+Check active sessions (should be empty after force logout):
+```sql
+SELECT * FROM user_usage_sessions
+WHERE user_id = 130 
+  AND logout_at IS NULL;
+```
+
+SECURITY FEATURES
+-----------------
+✓ User logged out from Azure when limit reached
+✓ All active sessions terminated
+✓ Cannot start new sessions until reset
+✓ Cannot access credentials until reset
+✓ Cannot provision resources until reset
+✓ Azure roles revoked (enforce_in_azure = true)
+✓ Azure resources stopped (VMs, AKS, App Services)
+✓ User account preserved (not deleted)
+✓ Automatic restoration at midnight
+✓ Monitor catches users who don't manually logout
+
+DIFFERENCES FROM PREVIOUS
+--------------------------
+
+BEFORE:
+- User ends session → blocked
+- User keeps session active → continues working
+- User could bypass by not ending session
+
+AFTER:
+- User ends session → ALL sessions logged out, blocked
+- User keeps session active → Monitor force logs out after 1 min
+- User CANNOT bypass - forced logout happens automatically
+- User CANNOT login again until midnight reset
+
+STATUS
+------
+✅ Forced logout on limit reached
+✅ All active sessions terminated
+✅ Auto logout by monitor (every minute)
+✅ Azure access revoked
+✅ Future logins blocked
+✅ Automatic reset at midnight
+
+PRODUCTION READY: YES

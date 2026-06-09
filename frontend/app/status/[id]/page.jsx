@@ -7,7 +7,8 @@ export const dynamic = 'force-dynamic';
 const isValidId = (value) => /^\d+$/.test(String(value || ''));
 
 export default async function StatusPage({ params }) {
-  const requestId = String(params?.id || '').trim();
+  const resolvedParams = await Promise.resolve(params);
+  const requestId = String(resolvedParams?.id || '').trim();
 
   if (!isValidId(requestId)) {
     notFound();

@@ -7,15 +7,17 @@ const validateRequestId = (requestId) => {
   }
 };
 
-const sendCredentialsForRequest = async (req, res, next) => {
+const sendCredentials = async (req, res, next) => {
   try {
     validateRequestId(req.params.id);
 
-    const result = await credentialService.sendCredentialsForRequest(Number(req.params.id));
+    const result = await credentialService.sendCredentials(Number(req.params.id));
 
     res.status(200).json({
       success: true,
-      emailSent: result.emailSent
+      requestId: result.requestId,
+      portalLink: result.portalLink,
+      usersSent: result.usersSent
     });
   } catch (error) {
     next(error);
@@ -39,5 +41,6 @@ const getCredentialDelivery = async (req, res, next) => {
 
 module.exports = {
   getCredentialDelivery,
-  sendCredentialsForRequest
+  sendCredentials,
+  sendCredentialsForRequest: sendCredentials
 };

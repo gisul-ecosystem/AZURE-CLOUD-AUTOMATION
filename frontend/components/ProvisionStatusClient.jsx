@@ -85,7 +85,7 @@ export default function ProvisionStatusClient({ requestId, initialSnapshot = nul
                   <strong>{rolesAssigned}</strong>
                 </div>
                 <div className="summary-card">
-                  <span>Credential Status</span>
+                  <span>Access Link Status</span>
                   <strong>{deliveryStatus}</strong>
                 </div>
                 <div className="summary-card">
@@ -159,11 +159,11 @@ export default function ProvisionStatusClient({ requestId, initialSnapshot = nul
               <div style={{ height: 12 }} />
 
               <div className="status-card">
-                <span>Credential status</span>
+                <span>Access link status</span>
                 <strong>{deliveryStatus}</strong>
                 <p className="dashboard-subcopy">
-                  Credentials are delivered by the backend email step and reported here through
-                  polling.
+                  The secure manage-users link is delivered by the backend email step and reported
+                  here through polling.
                 </p>
               </div>
             </div>

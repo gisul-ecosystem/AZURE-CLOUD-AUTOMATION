@@ -28,8 +28,8 @@ const STEP_DEFINITIONS = [
   },
   {
     key: 'credentials',
-    title: 'Sending Credentials',
-    description: 'Email temporary access details to the customer.'
+    title: 'Sending Access Link',
+    description: 'Email the secure manage-users link to the customer.'
   }
 ];
 
@@ -208,7 +208,7 @@ export function useProvisionFlow(requestId, initialSnapshot = null) {
         },
         {
           key: 'credentials',
-          title: 'Sending Credentials',
+          title: 'Sending Access Link',
           action: () => sendCredentials(requestId)
         }
       ];

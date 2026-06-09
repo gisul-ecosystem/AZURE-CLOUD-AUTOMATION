@@ -5,7 +5,7 @@ import { useRouter } from 'next/navigation';
 import PricingSummary from './PricingSummary';
 import RequestForm from './RequestForm';
 import RequestTimeline from './RequestTimeline';
-import { createRequestWithPricing } from '../services/api';
+import { createRequestWithPricing, getServiceRoles, getServices } from '../services/api';
 import useLocations from '../hooks/useLocations';
 import useServicePricing from '../hooks/useServicePricing';
 
@@ -34,9 +34,19 @@ const getPositiveInteger = (value) => {
   return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
 };
 
+const normalizeServiceName = (value) =>
+  String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/^azure\s+/, '');
+
 export default function RequestWorkspace() {
   const router = useRouter();
   const [selectedServices, setSelectedServices] = useState([]);
+  const [provisionableServices, setProvisionableServices] = useState([]);
+  const [provisionableServicesLoading, setProvisionableServicesLoading] = useState(true);
+  const [serviceRolesByServiceId, setServiceRolesByServiceId] = useState({});
+  const [selectedRolesByServiceId, setSelectedRolesByServiceId] = useState({});
   const selectedServiceIds = useMemo(
     () =>
       selectedServices
@@ -50,7 +60,9 @@ export default function RequestWorkspace() {
     accountCount: '',
     location: '',
     startDate: getTodayDateTime(),
-    endDate: getDateTimePlusDays(30)
+    endDate: getDateTimePlusDays(30),
+    enableDailyUsage: false,
+    dailyLimitHours: ''
   });
   const [pricing, setPricing] = useState({
     loading: false,
@@ -69,6 +81,36 @@ export default function RequestWorkspace() {
     loading: servicesLoading,
     error: servicesError
   } = useServicePricing();
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadProvisionableServices = async () => {
+      setProvisionableServicesLoading(true);
+
+      try {
+        const nextServices = await getServices();
+
+        if (!cancelled) {
+          setProvisionableServices(Array.isArray(nextServices) ? nextServices : []);
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setProvisionableServices([]);
+        }
+      } finally {
+        if (!cancelled) {
+          setProvisionableServicesLoading(false);
+        }
+      }
+    };
+
+    loadProvisionableServices();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     setForm((current) => (current.location ? { ...current, location: '' } : current));
@@ -105,6 +147,126 @@ export default function RequestWorkspace() {
     setSelectedServices((current) => current.filter((id) => availableIds.has(Number(id))));
   }, [pricedServices]);
 
+  const selectedCatalogServices = useMemo(() => {
+    const selectedIds = new Set(selectedServices.map((id) => String(id)));
+    return pricedServices.filter((service) => selectedIds.has(String(service.id)));
+  }, [pricedServices, selectedServices]);
+
+  const selectedServiceRoleEntries = useMemo(() => {
+    return selectedCatalogServices.map((catalogService) => {
+      const matchedService = provisionableServices.find(
+        (service) => normalizeServiceName(service.name) === normalizeServiceName(catalogService.name)
+      );
+      const backendServiceId = matchedService ? Number(matchedService.id) : null;
+      const availableRoles = backendServiceId ? serviceRolesByServiceId[backendServiceId] || [] : [];
+      const selectedRoles = backendServiceId ? selectedRolesByServiceId[backendServiceId] || [] : [];
+
+      return {
+        catalogServiceId: Number(catalogService.id),
+        name: catalogService.name || catalogService.service_name || 'Unnamed service',
+        backendServiceId,
+        availableRoles,
+        selectedRoles,
+        loading:
+          provisionableServicesLoading ||
+          (backendServiceId ? serviceRolesByServiceId[backendServiceId] === undefined : false)
+      };
+    });
+  }, [
+    provisionableServices,
+    provisionableServicesLoading,
+    pricedServices,
+    selectedCatalogServices,
+    selectedRolesByServiceId,
+    serviceRolesByServiceId
+  ]);
+
+  useEffect(() => {
+    const activeBackendServiceIds = new Set(
+      selectedServiceRoleEntries
+        .map((entry) => entry.backendServiceId)
+        .filter((value) => Number.isInteger(value) && value > 0)
+    );
+
+    setSelectedRolesByServiceId((current) => {
+      const next = {};
+      let changed = false;
+
+      for (const [serviceId, roles] of Object.entries(current)) {
+        if (activeBackendServiceIds.has(Number(serviceId))) {
+          next[serviceId] = roles;
+        } else {
+          changed = true;
+        }
+      }
+
+      const currentKeys = Object.keys(current);
+      const nextKeys = Object.keys(next);
+
+      if (
+        !changed &&
+        currentKeys.length === nextKeys.length &&
+        currentKeys.every((key) => {
+          const currentRoles = Array.isArray(current[key]) ? current[key] : [];
+          const nextRoles = Array.isArray(next[key]) ? next[key] : [];
+          return (
+            currentRoles.length === nextRoles.length &&
+            currentRoles.every((role, index) => role === nextRoles[index])
+          );
+        })
+      ) {
+        return current;
+      }
+
+      return next;
+    });
+  }, [selectedServiceRoleEntries]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadServiceRoles = async () => {
+      const missingEntries = selectedServiceRoleEntries.filter(
+        (entry) => entry.backendServiceId && serviceRolesByServiceId[entry.backendServiceId] === undefined
+      );
+
+      if (missingEntries.length === 0) {
+        return;
+      }
+
+      const nextRoles = {};
+
+      await Promise.all(
+        missingEntries.map(async (entry) => {
+          try {
+            const roles = await getServiceRoles(entry.backendServiceId);
+
+            if (!cancelled) {
+              nextRoles[entry.backendServiceId] = Array.isArray(roles) ? roles : [];
+            }
+          } catch (error) {
+            if (!cancelled) {
+              nextRoles[entry.backendServiceId] = [];
+            }
+          }
+        })
+      );
+
+      if (!cancelled && Object.keys(nextRoles).length > 0) {
+        setServiceRolesByServiceId((current) => ({
+          ...current,
+          ...nextRoles
+        }));
+      }
+    };
+
+    loadServiceRoles();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedServiceRoleEntries, serviceRolesByServiceId]);
+
   const selectedDuration = useMemo(() => {
     if (!form.startDate || !form.endDate) {
       return { hours: 0, days: 0 };
@@ -125,28 +287,31 @@ export default function RequestWorkspace() {
     };
   }, [form.startDate, form.endDate]);
 
-  const selectedCatalogServices = useMemo(() => {
-    const selectedIds = new Set(selectedServices.map((id) => String(id)));
-    return pricedServices.filter((service) => selectedIds.has(String(service.id)));
-  }, [pricedServices, selectedServices]);
-
-  const selectedServicesForProvisioning = useMemo(
-    () => selectedCatalogServices.filter((service) => Boolean(service.azure_role)),
-    [selectedCatalogServices]
-  );
-
-  const provisionServiceIds = useMemo(
+  const selectedRolesPayload = useMemo(
     () =>
-      selectedServicesForProvisioning
-        .map((service) => Number(service.id))
-        .filter((value) => Number.isInteger(value) && value > 0),
-    [selectedServicesForProvisioning]
+      selectedServiceRoleEntries
+        .filter((entry) => entry.backendServiceId && entry.selectedRoles.length > 0)
+        .map((entry) => ({
+          serviceId: Number(entry.backendServiceId),
+          roles: entry.selectedRoles
+        })),
+    [selectedServiceRoleEntries]
   );
 
   const updateField = (event) => {
     const { name, value } = event.target;
     setSubmitError('');
     setSubmitDebug('');
+    
+    // Handle checkbox
+    if (name === 'enableDailyUsage') {
+      setForm((current) => ({
+        ...current,
+        [name]: value
+      }));
+      return;
+    }
+    
     setForm((current) => ({
       ...current,
       [name]: value
@@ -246,6 +411,11 @@ export default function RequestWorkspace() {
       return;
     }
 
+    if (selectedRolesPayload.length === 0) {
+      setSubmitError('Select at least one role for the chosen services.');
+      return;
+    }
+
     if (!form.location) {
       setSubmitError('Select a region for the selected services.');
       return;
@@ -259,15 +429,30 @@ export default function RequestWorkspace() {
     setSubmitting(true);
 
     try {
-      const result = await createRequestWithPricing({
+      const requestPayload = {
         customerEmail: form.customerEmail.trim(),
         accountCount: payload.accountCount,
         location: form.location,
         startDate: form.startDate,
         endDate: form.endDate,
         serviceIds: payload.serviceIds,
-        provisionServiceIds
-      });
+        selectedRoles: selectedRolesPayload
+      };
+
+      // Add daily usage fields if enabled
+      if (form.enableDailyUsage) {
+        const dailyLimitHours = Number.parseFloat(form.dailyLimitHours);
+        if (!dailyLimitHours || dailyLimitHours <= 0) {
+          setSubmitError('Daily usage limit must be a positive number.');
+          setSubmitting(false);
+          return;
+        }
+
+        requestPayload.enableDailyUsage = true;
+        requestPayload.dailyLimitMinutes = Math.round(dailyLimitHours * 60);
+      }
+
+      const result = await createRequestWithPricing(requestPayload);
 
       console.log('request_created', result);
       router.push(`/status/${result.requestId}`);
@@ -310,6 +495,23 @@ export default function RequestWorkspace() {
           locations={locations}
           services={pricedServices}
           selectedServiceIds={selectedServices}
+          selectedServiceRoleEntries={selectedServiceRoleEntries}
+          onToggleServiceRole={(serviceId, roleName) => {
+            setSubmitError('');
+            setSubmitDebug('');
+            setSelectedRolesByServiceId((current) => {
+              const key = String(serviceId);
+              const currentRoles = Array.isArray(current[key]) ? current[key] : [];
+              const hasRole = currentRoles.includes(roleName);
+
+              return {
+                ...current,
+                [key]: hasRole
+                  ? currentRoles.filter((role) => role !== roleName)
+                  : [...currentRoles, roleName]
+              };
+            });
+          }}
           onFieldChange={updateField}
           onSelectionChange={setSelectedServices}
           onSubmit={handleSubmit}

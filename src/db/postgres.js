@@ -6,6 +6,8 @@ if (!process.env.DATABASE_URL) {
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
+  statement_timeout: 15000,
+  query_timeout: 15000,
   ssl: {
     rejectUnauthorized: false
   },
