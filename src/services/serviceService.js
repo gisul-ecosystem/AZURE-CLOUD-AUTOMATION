@@ -161,7 +161,10 @@ const getActiveServices = async (category, location) => {
         azure_role,
         description,
         price_per_user,
-        active
+        active,
+        COALESCE(enable_role_selection, true) AS enable_role_selection,
+        default_role,
+        COALESCE(role_required, true) AS role_required
       FROM services
       WHERE active = true
         AND category = $1
@@ -175,7 +178,10 @@ const getActiveServices = async (category, location) => {
         azure_role,
         description,
         price_per_user,
-        active
+        active,
+        COALESCE(enable_role_selection, true) AS enable_role_selection,
+        default_role,
+        COALESCE(role_required, true) AS role_required
       FROM services
       WHERE active = true
       ORDER BY name
@@ -187,7 +193,9 @@ const getActiveServices = async (category, location) => {
   return result.rows.map((service) => ({
     ...service,
     price_per_user: Number(service.price_per_user),
-    active: Boolean(service.active)
+    active: Boolean(service.active),
+    enable_role_selection: Boolean(service.enable_role_selection),
+    role_required: Boolean(service.role_required)
   }));
 };
 
@@ -349,7 +357,10 @@ const getActiveServicesWithPricing = async (location) => {
         azure_role,
         description,
         price_per_user,
-        active
+        active,
+        COALESCE(enable_role_selection, true) AS enable_role_selection,
+        default_role,
+        COALESCE(role_required, true) AS role_required
       FROM services
       WHERE active = true
       ORDER BY name
@@ -371,6 +382,9 @@ const getActiveServicesWithPricing = async (location) => {
           azure_role: service.azure_role,
           description: service.description,
           active: Boolean(service.active),
+          enable_role_selection: Boolean(service.enable_role_selection),
+          default_role: service.default_role,
+          role_required: Boolean(service.role_required),
           price,
           currency: azurePrice?.currency || 'USD',
           pricingSource: azurePrice ? 'azure' : 'database'

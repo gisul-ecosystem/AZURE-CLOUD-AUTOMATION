@@ -160,6 +160,11 @@ export default function RequestWorkspace() {
       const backendServiceId = matchedService ? Number(matchedService.id) : null;
       const availableRoles = backendServiceId ? serviceRolesByServiceId[backendServiceId] || [] : [];
       const selectedRoles = backendServiceId ? selectedRolesByServiceId[backendServiceId] || [] : [];
+      
+      // Get service configuration for role selection
+      const enableRoleSelection = matchedService?.enable_role_selection !== false; // default true
+      const defaultRole = matchedService?.default_role || null;
+      const roleRequired = matchedService?.role_required !== false; // default true
 
       return {
         catalogServiceId: Number(catalogService.id),
@@ -167,6 +172,9 @@ export default function RequestWorkspace() {
         backendServiceId,
         availableRoles,
         selectedRoles,
+        enableRoleSelection,
+        defaultRole,
+        roleRequired,
         loading:
           provisionableServicesLoading ||
           (backendServiceId ? serviceRolesByServiceId[backendServiceId] === undefined : false)
@@ -290,11 +298,35 @@ export default function RequestWorkspace() {
   const selectedRolesPayload = useMemo(
     () =>
       selectedServiceRoleEntries
-        .filter((entry) => entry.backendServiceId && entry.selectedRoles.length > 0)
-        .map((entry) => ({
-          serviceId: Number(entry.backendServiceId),
-          roles: entry.selectedRoles
-        })),
+        .map((entry) => {
+          // If role selection is disabled, auto-assign default role
+          if (!entry.enableRoleSelection && entry.defaultRole && entry.backendServiceId) {
+            console.log(`[ROLE_AUTO_ASSIGNED] Service ${entry.name}: ${entry.defaultRole}`);
+            return {
+              serviceId: Number(entry.backendServiceId),
+              roles: [entry.defaultRole]
+            };
+          }
+          
+          // If role selection is enabled, use manually selected roles
+          if (entry.enableRoleSelection && entry.backendServiceId && entry.selectedRoles.length > 0) {
+            return {
+              serviceId: Number(entry.backendServiceId),
+              roles: entry.selectedRoles
+            };
+          }
+          
+          // If role is not required and no roles selected, allow empty
+          if (!entry.roleRequired && entry.backendServiceId) {
+            return {
+              serviceId: Number(entry.backendServiceId),
+              roles: []
+            };
+          }
+          
+          return null;
+        })
+        .filter(Boolean),
     [selectedServiceRoleEntries]
   );
 
@@ -412,8 +444,15 @@ export default function RequestWorkspace() {
     }
 
     if (selectedRolesPayload.length === 0) {
-      setSubmitError('Select at least one role for the chosen services.');
-      return;
+      // Check if any service requires roles
+      const requiresRoles = selectedServiceRoleEntries.some(
+        (entry) => entry.backendServiceId && entry.roleRequired && entry.enableRoleSelection
+      );
+      
+      if (requiresRoles) {
+        setSubmitError('Select at least one role for services that require role selection.');
+        return;
+      }
     }
 
     if (!form.location) {

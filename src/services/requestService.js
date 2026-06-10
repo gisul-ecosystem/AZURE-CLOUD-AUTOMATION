@@ -330,89 +330,95 @@ async function createRequest({
 
     // ==========================
     // Save Selected Roles
+    // Auto-append default roles for services with enable_role_selection=false
     // ==========================
 
-    for (
-      const item
-      of (
-        selectedRoles
-        ||
-        []
-      )
-    ) {
+    // Get service configurations
+    const serviceConfigsResult = await client.query(
+      `
+      SELECT 
+        id,
+        name,
+        COALESCE(enable_role_selection, true) AS enable_role_selection,
+        default_role,
+        COALESCE(role_required, true) AS role_required
+      FROM services
+      WHERE id = ANY($1)
+      `,
+      [validServiceIds]
+    );
 
-      const sid =
-        Number(
-          item.serviceId
-        );
+    const serviceConfigs = new Map();
+    for (const svc of serviceConfigsResult.rows) {
+      serviceConfigs.set(Number(svc.id), {
+        enable_role_selection: Boolean(svc.enable_role_selection),
+        default_role: svc.default_role,
+        role_required: Boolean(svc.role_required),
+        name: svc.name
+      });
+    }
 
-      if (
-        !validServiceIds
-          .includes(
-            sid
-          )
-      ) {
+    // Build final role assignments
+    const roleAssignments = new Map(); // serviceId -> Set of roles
+
+    // First, process explicitly selected roles
+    for (const item of (selectedRoles || [])) {
+      const sid = Number(item.serviceId);
+
+      if (!validServiceIds.includes(sid)) {
         continue;
       }
 
-      const roles =
-        Array.isArray(
-          item.roles
-        )
-          ? item.roles
-          : [];
+      const roles = Array.isArray(item.roles) ? item.roles : [];
 
+      if (!roleAssignments.has(sid)) {
+        roleAssignments.set(sid, new Set());
+      }
 
+      for (const role of roles) {
+        roleAssignments.get(sid).add(role);
+        console.log(`[ROLE_MANUAL_SELECTED] Service ${sid}: ${role}`);
+      }
+    }
 
-      for (
-        const role
-        of roles
-      ) {
+    // Then, auto-assign default roles for services with enable_role_selection=false
+    for (const sid of validServiceIds) {
+      const config = serviceConfigs.get(sid);
 
+      if (!config) {
+        console.log(`[SERVICE_SELECTED] Service ${sid}: No configuration found, skipping role assignment`);
+        continue;
+      }
+
+      if (!config.enable_role_selection && config.default_role) {
+        if (!roleAssignments.has(sid)) {
+          roleAssignments.set(sid, new Set());
+        }
+
+        roleAssignments.get(sid).add(config.default_role);
+        console.log(`[ROLE_AUTO_ASSIGNED] Service ${sid} (${config.name}): ${config.default_role} (auto)`);
+      } else if (config.enable_role_selection) {
+        console.log(`[SERVICE_SELECTED] Service ${sid} (${config.name}): Role selection enabled`);
+      }
+    }
+
+    // Insert all role assignments into database
+    for (const [sid, rolesSet] of roleAssignments.entries()) {
+      for (const role of rolesSet) {
         await client.query(
           `
           INSERT INTO request_service_roles(
-
-            request_id,
-
-            service_id,
-
-            azure_role
-
-          )
-
-          VALUES(
-
-            $1,
-
-            $2,
-
-            $3
-
-          )
-
-          ON CONFLICT
-          (
             request_id,
             service_id,
             azure_role
           )
-
+          VALUES($1, $2, $3)
+          ON CONFLICT (request_id, service_id, azure_role)
           DO NOTHING
           `,
-          [
-
-            requestId,
-
-            sid,
-
-            role
-
-          ]
+          [requestId, sid, role]
         );
-
       }
-
     }
 
 

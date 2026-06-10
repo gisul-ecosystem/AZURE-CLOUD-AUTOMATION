@@ -67,32 +67,118 @@ const logManagePortalEvent = (level, event, details = {}) => {
   console.log(message);
 };
 
+/**
+ * Safe insert helper - inspects schema dynamically and inserts only existing columns
+ * Never throws errors - returns boolean success indicator
+ */
+const safeInsert = async (client, tableName, data) => {
+  try {
+    // Get table columns
+    const schemaResult = await client.query(
+      `
+      SELECT column_name
+      FROM information_schema.columns
+      WHERE table_name = $1
+      ORDER BY ordinal_position
+      `,
+      [tableName]
+    );
+
+    const availableColumns = schemaResult.rows.map((row) => row.column_name);
+
+    if (availableColumns.length === 0) {
+      logManagePortalEvent('error', 'safe_insert_no_columns', {
+        tableName,
+        reason: 'Table not found or has no columns'
+      });
+      return false;
+    }
+
+    // Filter data to only include existing columns
+    const insertData = {};
+    for (const [key, value] of Object.entries(data)) {
+      if (availableColumns.includes(key)) {
+        insertData[key] = value;
+      }
+    }
+
+    if (Object.keys(insertData).length === 0) {
+      logManagePortalEvent('error', 'safe_insert_no_matching_columns', {
+        tableName,
+        requestedColumns: Object.keys(data),
+        availableColumns
+      });
+      return false;
+    }
+
+    // Build dynamic INSERT query
+    const columns = Object.keys(insertData);
+    const values = Object.values(insertData);
+    const placeholders = columns.map((_, i) => `$${i + 1}`).join(', ');
+    const columnList = columns.join(', ');
+
+    const query = `
+      INSERT INTO ${tableName} (${columnList})
+      VALUES (${placeholders})
+    `;
+
+    await client.query(query, values);
+    return true;
+  } catch (error) {
+    logManagePortalEvent('error', 'safe_insert_failed', {
+      tableName,
+      message: error?.message,
+      code: error?.code
+    });
+    return false;
+  }
+};
+
+/**
+ * Record audit log - ALWAYS executes outside transaction context
+ * If called within failed transaction, uses separate client
+ */
 const recordAuditLog = async (
   client,
   { requestId = null, customerEmail = null, actor = 'customer', action, targetUserId = null, details = null }
 ) => {
+  // If transaction is in error state, use new client
+  let effectiveClient = client;
+  let shouldRelease = false;
+
   try {
-    await client.query(
-      `
-        INSERT INTO access_portal_audit_logs (
-          request_id,
-          customer_email,
-          actor,
-          action,
-          target_user_id,
-          details
-        )
-        VALUES ($1, $2, $3, $4, $5, $6)
-      `,
-      [
+    // Test if client transaction is aborted
+    if (client && client.query) {
+      try {
+        await client.query('SELECT 1');
+      } catch (testError) {
+        if (testError?.message?.includes('aborted')) {
+          // Transaction aborted, use new client
+          effectiveClient = await db.connect();
+          shouldRelease = true;
+          logManagePortalEvent('info', 'audit_log_using_new_client', {
+            reason: 'Previous transaction aborted'
+          });
+        }
+      }
+    }
+
+    const success = await safeInsert(effectiveClient, 'access_portal_audit_logs', {
+      request_id: requestId,
+      customer_email: customerEmail,
+      actor,
+      action,
+      target_user_id: targetUserId,
+      details: details ? JSON.stringify(details) : null
+    });
+
+    if (!success) {
+      logManagePortalEvent('error', 'audit_log_skipped', {
         requestId,
-        customerEmail,
-        actor,
         action,
-        targetUserId,
-        details ? JSON.stringify(details) : null
-      ]
-    );
+        reason: 'Safe insert failed'
+      });
+    }
   } catch (error) {
     logManagePortalEvent('error', 'audit_log_write_failed', {
       requestId,
@@ -102,31 +188,58 @@ const recordAuditLog = async (
       targetUserId,
       message: error?.message
     });
+  } finally {
+    if (shouldRelease && effectiveClient) {
+      effectiveClient.release();
+    }
   }
 };
 
+/**
+ * Record cleanup log - Never breaks transaction
+ * Maps event_name to event if column doesn't exist
+ */
 const recordCleanupLog = async (client, { requestId, eventName, logLevel, message, details = null }) => {
   try {
-    await client.query(
+    // Try to determine which column exists: event_name or event
+    const columnCheckResult = await client.query(
       `
-        INSERT INTO cleanup_logs (
-          request_id,
-          event_name,
-          log_level,
-          message,
-          details_json
-        )
-        VALUES ($1, $2, $3, $4, $5)
+      SELECT column_name
+      FROM information_schema.columns
+      WHERE table_name = 'cleanup_logs'
+        AND column_name IN ('event_name', 'event')
       `,
-      [
+      []
+    );
+
+    const hasEventName = columnCheckResult.rows.some((row) => row.column_name === 'event_name');
+    const hasEvent = columnCheckResult.rows.some((row) => row.column_name === 'event');
+
+    const data = {
+      request_id: requestId,
+      log_level: logLevel,
+      message,
+      details_json: details ? JSON.stringify(details) : null
+    };
+
+    // Map eventName to appropriate column
+    if (hasEventName) {
+      data.event_name = eventName;
+    } else if (hasEvent) {
+      data.event = eventName;
+    }
+
+    const success = await safeInsert(client, 'cleanup_logs', data);
+
+    if (!success) {
+      logManagePortalEvent('error', 'cleanup_log_skipped', {
         requestId,
         eventName,
-        logLevel,
-        message,
-        details ? JSON.stringify(details) : null
-      ]
-    );
+        reason: 'Safe insert failed'
+      });
+    }
   } catch (error) {
+    // Never throw - just log
     logManagePortalEvent('error', 'cleanup_log_write_failed', {
       requestId,
       eventName,
@@ -320,15 +433,29 @@ const issueAccessPortalTokenForRequest = async (requestId) => {
     tokenHash
   ]);
 
-  await recordAuditLog(db, {
-    requestId,
-    customerEmail: request.customer_email,
-    actor: 'system',
-    action: 'portal_token_issued',
-    details: {
-      expiresAt: expiresAt.toISOString()
+  // Record audit log using separate connection to ensure transaction safety
+  try {
+    const auditClient = await db.connect();
+    try {
+      await recordAuditLog(auditClient, {
+        requestId,
+        customerEmail: request.customer_email,
+        actor: 'system',
+        action: 'portal_token_issued',
+        details: {
+          expiresAt: expiresAt.toISOString()
+        }
+      });
+    } finally {
+      auditClient.release();
     }
-  });
+  } catch (auditError) {
+    logManagePortalEvent('error', 'audit_log_skipped', {
+      requestId,
+      action: 'portal_token_issued',
+      reason: auditError?.message
+    });
+  }
 
   const manageUrl = buildManageUrl(rawToken);
 
@@ -357,6 +484,8 @@ const exchangeAccessToken = async (rawToken, credentials = {}) => {
 
   const tokenHash = sha256Hex(token);
   const client = await db.connect();
+  let transactionSuccess = false;
+  let responseData = null;
 
   try {
     await client.query('BEGIN');
@@ -450,20 +579,20 @@ const exchangeAccessToken = async (rawToken, credentials = {}) => {
 
     const userId = userResult.rows[0]?.id || null;
 
-    await recordAuditLog(client, {
+    responseData = {
       requestId: portalToken.request_id,
       customerEmail: portalToken.customer_email,
-      actor: 'customer',
-      action: 'portal_token_consumed',
-      details: {
-        expiresAt: sessionExpiresAt.toISOString(),
-        userId,
-        adminId: admin.id,
-        adminUsername: admin.username
-      }
-    });
+      admin,
+      resourceGroup,
+      sessionToken,
+      expiresAt: sessionExpiresAt,
+      userId,
+      adminId: admin.id,
+      adminUsername: admin.username
+    };
 
     await client.query('COMMIT');
+    transactionSuccess = true;
 
     logManagePortalEvent('info', 'portal_token_consumed', {
       requestId: portalToken.request_id,
@@ -471,22 +600,52 @@ const exchangeAccessToken = async (rawToken, credentials = {}) => {
       userId,
       adminId: admin.id
     });
-
-    return {
-      requestId: portalToken.request_id,
-      customerEmail: portalToken.customer_email,
-      admin,
-      resourceGroup,
-      sessionToken,
-      expiresAt: sessionExpiresAt,
-      userId
-    };
   } catch (error) {
     await client.query('ROLLBACK');
     throw error;
   } finally {
     client.release();
   }
+
+  // Record audit log AFTER transaction completes (using separate connection)
+  if (transactionSuccess && responseData) {
+    try {
+      const auditClient = await db.connect();
+      try {
+        await recordAuditLog(auditClient, {
+          requestId: responseData.requestId,
+          customerEmail: responseData.customerEmail,
+          actor: 'customer',
+          action: 'portal_token_consumed',
+          details: {
+            expiresAt: responseData.expiresAt.toISOString(),
+            userId: responseData.userId,
+            adminId: responseData.adminId,
+            adminUsername: responseData.adminUsername
+          }
+        });
+      } finally {
+        auditClient.release();
+      }
+    } catch (auditError) {
+      // Log but don't fail the operation
+      logManagePortalEvent('error', 'audit_log_skipped', {
+        requestId: responseData.requestId,
+        action: 'portal_token_consumed',
+        reason: auditError?.message
+      });
+    }
+  }
+
+  return {
+    requestId: responseData.requestId,
+    customerEmail: responseData.customerEmail,
+    admin: responseData.admin,
+    resourceGroup: responseData.resourceGroup,
+    sessionToken: responseData.sessionToken,
+    expiresAt: responseData.expiresAt,
+    userId: responseData.userId
+  };
 };
 
 const listPortalUsers = async (sessionToken, requestId) => {
@@ -500,15 +659,29 @@ const listPortalUsers = async (sessionToken, requestId) => {
 
   const users = await getManageUsersForRequest(db, requestId);
 
-  await recordAuditLog(db, {
-    requestId,
-    customerEmail: session.customer_email,
-    actor: 'customer',
-    action: 'manage_request_loaded',
-    details: {
-      userCount: users.length
+  // Record audit log using separate connection to ensure transaction safety
+  try {
+    const auditClient = await db.connect();
+    try {
+      await recordAuditLog(auditClient, {
+        requestId,
+        customerEmail: session.customer_email,
+        actor: 'customer',
+        action: 'manage_request_loaded',
+        details: {
+          userCount: users.length
+        }
+      });
+    } finally {
+      auditClient.release();
     }
-  });
+  } catch (auditError) {
+    logManagePortalEvent('error', 'audit_log_skipped', {
+      requestId,
+      action: 'manage_request_loaded',
+      reason: auditError?.message
+    });
+  }
 
   return {
     requestId: Number(requestId),
@@ -672,6 +845,8 @@ const deletePortalUser = async (sessionToken, requestId, userId) => {
   }
 
   const client = await db.connect();
+  let deletedUser = null;
+  let transactionSuccess = false;
 
   try {
     await client.query('BEGIN');
@@ -721,6 +896,7 @@ const deletePortalUser = async (sessionToken, requestId, userId) => {
       [requestId, targetUserId]
     );
 
+    // Record cleanup log (never throws)
     await recordCleanupLog(client, {
       requestId,
       eventName: 'manage_user_deleted',
@@ -733,31 +909,61 @@ const deletePortalUser = async (sessionToken, requestId, userId) => {
       }
     });
 
-    await recordAuditLog(client, {
-      requestId,
-      customerEmail: session.customer_email,
-      actor: 'customer',
-      action: 'manage_user_deleted',
-      targetUserId,
-      details: {
-        azureUserId: user.azure_user_id,
-        assignmentsRemoved: assignments.length
-      }
-    });
-
-    await client.query('COMMIT');
-
-    return {
+    deletedUser = {
       id: targetUserId,
       azureUserId: user.azure_user_id,
-      deleted: true
+      assignmentsRemoved: assignments.length
     };
+
+    await client.query('COMMIT');
+    transactionSuccess = true;
+
+    logManagePortalEvent('info', 'user_delete_completed', {
+      requestId,
+      userId: targetUserId,
+      azureUserId: user.azure_user_id
+    });
   } catch (error) {
     await client.query('ROLLBACK');
     throw error;
   } finally {
     client.release();
   }
+
+  // Record audit log AFTER transaction completes (using separate connection if needed)
+  if (transactionSuccess && deletedUser) {
+    try {
+      const auditClient = await db.connect();
+      try {
+        await recordAuditLog(auditClient, {
+          requestId,
+          customerEmail: session.customer_email,
+          actor: 'customer',
+          action: 'manage_user_deleted',
+          targetUserId,
+          details: {
+            azureUserId: deletedUser.azureUserId,
+            assignmentsRemoved: deletedUser.assignmentsRemoved
+          }
+        });
+      } finally {
+        auditClient.release();
+      }
+    } catch (auditError) {
+      // Log but don't fail the operation
+      logManagePortalEvent('error', 'audit_log_skipped', {
+        requestId,
+        action: 'manage_user_deleted',
+        reason: auditError?.message
+      });
+    }
+  }
+
+  return {
+    id: deletedUser.id,
+    azureUserId: deletedUser.azureUserId,
+    deleted: true
+  };
 };
 
 const updatePortalUserRoles = async (sessionToken, requestId, userId, roles) => {
@@ -776,6 +982,9 @@ const updatePortalUserRoles = async (sessionToken, requestId, userId, roles) => 
   }
 
   const client = await db.connect();
+  let transactionSuccess = false;
+  let assignedRoles = [];
+  let azureUserId = null;
 
   try {
     await client.query('BEGIN');
@@ -786,6 +995,8 @@ const updatePortalUserRoles = async (sessionToken, requestId, userId, roles) => 
     if (!request || !user) {
       throw new AppError('User not found.', 404);
     }
+
+    azureUserId = user.azure_user_id;
 
     const scope = await getRequestPrimaryScope(client, requestId);
     const currentAssignments = await getPortalAssignmentsForUser(client, requestId, targetUserId);
@@ -803,8 +1014,6 @@ const updatePortalUserRoles = async (sessionToken, requestId, userId, roles) => 
       `,
       [requestId, targetUserId]
     );
-
-    const assignedRoles = [];
 
     for (const roleName of normalizedRoles) {
       const roleDefinition = await findMatchingRoleDefinition(authorizationClient, scope, roleName);
@@ -858,36 +1067,54 @@ const updatePortalUserRoles = async (sessionToken, requestId, userId, roles) => 
       });
     }
 
-    await recordAuditLog(client, {
-      requestId,
-      customerEmail: session.customer_email,
-      actor: 'customer',
-      action: 'manage_user_roles_updated',
-      targetUserId,
-      details: {
-        roles: assignedRoles
-      }
-    });
-
     await client.query('COMMIT');
+    transactionSuccess = true;
 
     logManagePortalEvent('info', 'manage_user_roles_updated', {
       requestId,
       userId: targetUserId,
       roles: assignedRoles.length
     });
-
-    return {
-      id: targetUserId,
-      azureUserId: user.azure_user_id,
-      roles: assignedRoles
-    };
   } catch (error) {
     await client.query('ROLLBACK');
     throw error;
   } finally {
     client.release();
   }
+
+  // Record audit log AFTER transaction completes (using separate connection)
+  if (transactionSuccess) {
+    try {
+      const auditClient = await db.connect();
+      try {
+        await recordAuditLog(auditClient, {
+          requestId,
+          customerEmail: session.customer_email,
+          actor: 'customer',
+          action: 'manage_user_roles_updated',
+          targetUserId,
+          details: {
+            roles: assignedRoles
+          }
+        });
+      } finally {
+        auditClient.release();
+      }
+    } catch (auditError) {
+      // Log but don't fail the operation
+      logManagePortalEvent('error', 'audit_log_skipped', {
+        requestId,
+        action: 'manage_user_roles_updated',
+        reason: auditError?.message
+      });
+    }
+  }
+
+  return {
+    id: targetUserId,
+    azureUserId,
+    roles: assignedRoles
+  };
 };
 
 module.exports = {
