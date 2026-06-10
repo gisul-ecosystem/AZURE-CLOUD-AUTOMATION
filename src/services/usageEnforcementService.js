@@ -1,29 +1,119 @@
-const { ComputeManagementClient } = require('@azure/arm-compute');
-const { ContainerServiceClient } = require('@azure/arm-containerservice');
-const { WebSiteManagementClient } = require('@azure/arm-appservice');
-const { AuthorizationManagementClient } = require('@azure/arm-authorization');
+const { Client } = require('@microsoft/microsoft-graph-client');
+const { ClientSecretCredential } = require('@azure/identity');
 const { createAzureCredential, validateAzureEnv } = require('../config/azure');
 const db = require('../db/postgres');
 const AppError = require('../utils/AppError');
 
 /**
- * Enforce usage limit by revoking Azure access or stopping resources
+ * Create Microsoft Graph client
+ */
+const createGraphClient = () => {
+  const tenantId = process.env.AZURE_TENANT_ID;
+  const clientId = process.env.AZURE_CLIENT_ID;
+  const clientSecret = process.env.AZURE_CLIENT_SECRET;
+
+  if (!tenantId || !clientId || !clientSecret) {
+    throw new Error('Missing required Azure credentials for Graph API');
+  }
+
+  const credential = new ClientSecretCredential(tenantId, clientId, clientSecret);
+
+  const client = Client.initWithMiddleware({
+    authProvider: {
+      getAccessToken: async () => {
+        const token = await credential.getToken('https://graph.microsoft.com/.default');
+        return token.token;
+      }
+    }
+  });
+
+  return client;
+};
+
+/**
+ * Revoke Azure access by terminating sessions and disabling account
+ * Does NOT remove RBAC assignments - preserves permissions for next day
+ */
+async function revokeAzureAccess({ azureUserId, userId, requestId }) {
+  try {
+    console.log(`[AZURE_REVOKE] Revoking Azure access for user ${userId} (Azure ID: ${azureUserId})`);
+
+    const client = createGraphClient();
+    const actions = [];
+
+    // Step 1: Revoke all active sign-in sessions
+    try {
+      await client.api(`/users/${azureUserId}/revokeSignInSessions`).post({});
+      console.log(`[AZURE_SESSION_REVOKED] All sign-in sessions revoked for Azure user ${azureUserId}`);
+      actions.push({ action: 'revoke_sessions', status: 'success' });
+    } catch (error) {
+      console.error(`[AZURE_REVOKE] Error revoking sessions: ${error.message}`);
+      actions.push({ action: 'revoke_sessions', status: 'failed', error: error.message });
+    }
+
+    // Step 2: Disable the Azure account
+    try {
+      await client.api(`/users/${azureUserId}`).patch({
+        accountEnabled: false
+      });
+      console.log(`[ACCOUNT_DISABLED] Azure account disabled for user ${azureUserId}`);
+      actions.push({ action: 'disable_account', status: 'success' });
+    } catch (error) {
+      console.error(`[AZURE_REVOKE] Error disabling account: ${error.message}`);
+      actions.push({ action: 'disable_account', status: 'failed', error: error.message });
+    }
+
+    return actions;
+  } catch (error) {
+    console.error(`[AZURE_REVOKE] Error revoking Azure access:`, error);
+    throw error;
+  }
+}
+
+/**
+ * Restore Azure access by enabling account
+ * Used during daily reset at midnight
+ */
+async function restoreAzureAccess({ azureUserId, userId, requestId }) {
+  try {
+    console.log(`[AZURE_RESTORE] Restoring Azure access for user ${userId} (Azure ID: ${azureUserId})`);
+
+    const client = createGraphClient();
+
+    // Re-enable the Azure account
+    await client.api(`/users/${azureUserId}`).patch({
+      accountEnabled: true
+    });
+
+    console.log(`[ACCOUNT_RESTORED] Azure account re-enabled for user ${azureUserId}`);
+
+    return {
+      action: 'restore_account',
+      status: 'success'
+    };
+  } catch (error) {
+    console.error(`[AZURE_RESTORE] Error restoring Azure access:`, error);
+    throw error;
+  }
+}
+
+/**
+ * Enforce usage limit by revoking Azure sessions and disabling account
+ * RBAC assignments are preserved for next day
  */
 async function enforceUsageLimit({ requestId, userId }) {
   try {
-    console.log(`Enforcing usage limit for request ${requestId}, user ${userId}`);
+    console.log(`[ENFORCEMENT] Enforcing usage limit for request ${requestId}, user ${userId}`);
 
     // Get request and user details
     const result = await db.query(
       `
       SELECT 
         r.id as request_id,
-        r.location,
         r.enforce_in_azure,
         au.id as user_id,
         au.azure_user_id,
-        au.principal_id,
-        au.resource_group_name,
+        au.azure_username,
         au.used_today_minutes,
         r.daily_limit_minutes
       FROM requests r
@@ -41,7 +131,7 @@ async function enforceUsageLimit({ requestId, userId }) {
 
     // Check if enforcement in Azure is enabled
     if (!data.enforce_in_azure) {
-      console.log(`Azure enforcement disabled for request ${requestId}. Skipping.`);
+      console.log(`[ENFORCEMENT] Azure enforcement disabled for request ${requestId}. Skipping.`);
       return {
         success: true,
         message: 'Azure enforcement is disabled for this request.',
@@ -62,31 +152,40 @@ async function enforceUsageLimit({ requestId, userId }) {
       };
     }
 
-    console.log(`[ENFORCEMENT] User ${userId} exceeded limit: ${usedMinutes}/${limitMinutes} minutes - revoking access and forcing logout`);
+    console.log(
+      `[ENFORCEMENT] User ${userId} (${data.azure_username}) exceeded limit: ${usedMinutes}/${limitMinutes} minutes`
+    );
 
-    // Initialize Azure clients
-    const azureConfig = validateAzureEnv();
-    const credential = createAzureCredential(azureConfig);
-
-    // Force logout by revoking Azure RBAC role assignments (DO NOT delete user)
-    const roleAssignmentsRevoked = await revokeRoleAssignments({
-      credential,
-      subscriptionId: azureConfig.subscriptionId,
-      resourceGroupName: data.resource_group_name,
-      principalId: data.principal_id,
-      requestId,
-      userId
+    // Revoke Azure sessions and disable account
+    const azureActions = await revokeAzureAccess({
+      azureUserId: data.azure_user_id,
+      userId,
+      requestId
     });
 
-    // Stop Azure resources (VMs, AKS, App Services) to force logout
-    const resourcesStopped = await stopAzureResources({
-      credential,
-      subscriptionId: azureConfig.subscriptionId,
-      resourceGroupName: data.resource_group_name,
-      location: data.location,
-      requestId,
-      userId
-    });
+    // Update database status
+    await db.query(
+      `
+      UPDATE azure_users
+      SET 
+        blocked_until = (CURRENT_DATE + INTERVAL '1 day'),
+        status = 'Blocked'
+      WHERE id = $1 AND request_id = $2
+      `,
+      [userId, requestId]
+    );
+
+    // Close all active sessions
+    await db.query(
+      `
+      UPDATE user_usage_sessions
+      SET logout_at = NOW()
+      WHERE request_id = $1 
+        AND user_id = $2 
+        AND logout_at IS NULL
+      `,
+      [requestId, userId]
+    );
 
     // Log enforcement action
     await db.query(
@@ -103,30 +202,32 @@ async function enforceUsageLimit({ requestId, userId }) {
       [
         requestId,
         userId,
-        'limit_exceeded_forced_logout',
+        'limit_exceeded_azure_revoked',
         JSON.stringify({
-          roleAssignmentsRevoked,
-          resourcesStopped,
+          azureActions,
           usedMinutes,
           limitMinutes,
-          action: 'forced_logout_and_revoke_access'
+          azureUsername: data.azure_username,
+          message: 'Azure sessions revoked and account disabled. RBAC preserved.'
         })
       ]
     );
 
-    console.log(`[ENFORCEMENT] Access revoked and user ${userId} forced logout. User account preserved.`);
+    console.log(
+      `[ENFORCEMENT] Azure access revoked for user ${userId} (${data.azure_username}). ` +
+      `Account disabled. RBAC assignments preserved.`
+    );
 
     return {
       success: true,
-      message: 'Usage limit enforced in Azure. Access revoked but user account preserved.',
+      message: 'Usage limit enforced. Azure sessions revoked and account disabled. RBAC preserved.',
       enforced: true,
       details: {
-        roleAssignmentsRevoked,
-        resourcesStopped
+        azureActions
       }
     };
   } catch (error) {
-    console.error('Error enforcing usage limit:', error);
+    console.error('[ENFORCEMENT] Error enforcing usage limit:', error);
     
     // Log error but don't throw - enforcement failures shouldn't break the flow
     try {
@@ -152,7 +253,7 @@ async function enforceUsageLimit({ requestId, userId }) {
         ]
       );
     } catch (logError) {
-      console.error('Error logging enforcement failure:', logError);
+      console.error('[ENFORCEMENT] Error logging enforcement failure:', logError);
     }
 
     return {
@@ -163,144 +264,8 @@ async function enforceUsageLimit({ requestId, userId }) {
   }
 }
 
-/**
- * Revoke Azure RBAC role assignments for a principal
- */
-async function revokeRoleAssignments({
-  credential,
-  subscriptionId,
-  resourceGroupName,
-  principalId,
-  requestId,
-  userId
-}) {
-  if (!resourceGroupName || !principalId) {
-    console.log('Missing resource group or principal ID. Skipping role revocation.');
-    return [];
-  }
-
-  try {
-    const authClient = new AuthorizationManagementClient(credential, subscriptionId);
-    const scope = `/subscriptions/${subscriptionId}/resourceGroups/${resourceGroupName}`;
-
-    // List all role assignments for this principal in the resource group
-    const roleAssignments = [];
-    for await (const assignment of authClient.roleAssignments.listForScope(scope)) {
-      if (assignment.principalId === principalId) {
-        roleAssignments.push(assignment);
-      }
-    }
-
-    console.log(`Found ${roleAssignments.length} role assignments for user ${userId}`);
-
-    // Delete each role assignment
-    const revoked = [];
-    for (const assignment of roleAssignments) {
-      try {
-        await authClient.roleAssignments.deleteById(assignment.id);
-        revoked.push({
-          roleAssignmentId: assignment.id,
-          roleDefinitionId: assignment.roleDefinitionId,
-          scope: assignment.scope
-        });
-        console.log(`Revoked role assignment: ${assignment.id}`);
-      } catch (error) {
-        console.error(`Error revoking role assignment ${assignment.id}:`, error.message);
-      }
-    }
-
-    return revoked;
-  } catch (error) {
-    console.error('Error revoking role assignments:', error);
-    return [];
-  }
-}
-
-/**
- * Stop Azure resources (VMs, AKS, App Services) in the resource group
- */
-async function stopAzureResources({
-  credential,
-  subscriptionId,
-  resourceGroupName,
-  location,
-  requestId,
-  userId
-}) {
-  if (!resourceGroupName) {
-    console.log('Missing resource group name. Skipping resource stop.');
-    return [];
-  }
-
-  const stopped = [];
-
-  try {
-    // Stop VMs
-    const computeClient = new ComputeManagementClient(credential, subscriptionId);
-    try {
-      for await (const vm of computeClient.virtualMachines.list(resourceGroupName)) {
-        try {
-          console.log(`Stopping VM: ${vm.name}`);
-          await computeClient.virtualMachines.beginDeallocateAndWait(resourceGroupName, vm.name);
-          stopped.push({
-            type: 'VirtualMachine',
-            name: vm.name,
-            action: 'deallocate'
-          });
-        } catch (error) {
-          console.error(`Error stopping VM ${vm.name}:`, error.message);
-        }
-      }
-    } catch (error) {
-      console.error('Error listing VMs:', error.message);
-    }
-
-    // Stop AKS clusters
-    const aksClient = new ContainerServiceClient(credential, subscriptionId);
-    try {
-      for await (const cluster of aksClient.managedClusters.listByResourceGroup(resourceGroupName)) {
-        try {
-          console.log(`Stopping AKS cluster: ${cluster.name}`);
-          await aksClient.managedClusters.beginStopAndWait(resourceGroupName, cluster.name);
-          stopped.push({
-            type: 'AKSCluster',
-            name: cluster.name,
-            action: 'stop'
-          });
-        } catch (error) {
-          console.error(`Error stopping AKS cluster ${cluster.name}:`, error.message);
-        }
-      }
-    } catch (error) {
-      console.error('Error listing AKS clusters:', error.message);
-    }
-
-    // Stop App Services
-    const webClient = new WebSiteManagementClient(credential, subscriptionId);
-    try {
-      for await (const site of webClient.webApps.listByResourceGroup(resourceGroupName)) {
-        try {
-          console.log(`Stopping App Service: ${site.name}`);
-          await webClient.webApps.stop(resourceGroupName, site.name);
-          stopped.push({
-            type: 'AppService',
-            name: site.name,
-            action: 'stop'
-          });
-        } catch (error) {
-          console.error(`Error stopping App Service ${site.name}:`, error.message);
-        }
-      }
-    } catch (error) {
-      console.error('Error listing App Services:', error.message);
-    }
-  } catch (error) {
-    console.error('Error stopping Azure resources:', error);
-  }
-
-  return stopped;
-}
-
 module.exports = {
-  enforceUsageLimit
+  enforceUsageLimit,
+  revokeAzureAccess,
+  restoreAzureAccess
 };

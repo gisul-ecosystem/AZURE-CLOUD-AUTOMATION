@@ -1,6 +1,8 @@
 const cron = require('node-cron');
 const db = require('../db/postgres');
 const usageService = require('../services/usageService');
+const { monitorAzureSignIns } = require('../services/azureSignInMonitor');
+const { restoreAzureAccess } = require('../services/usageEnforcementService');
 
 /**
  * Monitor active sessions every minute
@@ -51,18 +53,58 @@ const monitorActiveSessions = async () => {
 /**
  * Reset daily usage counters at midnight
  * Runs daily at 00:00 (midnight)
+ * Also restores Azure account access for blocked users
  */
 const resetDailyUsageCounters = async () => {
   try {
     console.log('[USAGE_RESET] Running daily usage counter reset...');
 
+    // Get users that need to be restored in Azure
+    const blockedUsersResult = await db.query(
+      `
+      SELECT 
+        au.id,
+        au.request_id,
+        au.azure_user_id,
+        au.azure_username,
+        r.enforce_in_azure
+      FROM azure_users au
+      JOIN requests r ON r.id = au.request_id
+      WHERE au.blocked_until IS NOT NULL
+        AND r.enable_daily_usage = true 
+        AND r.status NOT IN ('Cancelled', 'Expired')
+        AND r.enforce_in_azure = true
+      `
+    );
+
+    console.log(`[USAGE_RESET] Found ${blockedUsersResult.rowCount} blocked user(s) to restore in Azure.`);
+
+    // Restore Azure accounts first
+    for (const user of blockedUsersResult.rows) {
+      try {
+        await restoreAzureAccess({
+          azureUserId: user.azure_user_id,
+          userId: user.id,
+          requestId: user.request_id
+        });
+        console.log(`[ACCOUNT_RESTORED] Azure account re-enabled for user ${user.id} (${user.azure_username})`);
+      } catch (error) {
+        console.error(
+          `[USAGE_RESET] Error restoring Azure access for user ${user.id} (${user.azure_username}):`,
+          error.message
+        );
+      }
+    }
+
+    // Reset database counters
     const result = await db.query(
       `
       UPDATE azure_users
       SET 
         used_today_minutes = 0,
         blocked_until = NULL,
-        last_reset_date = CURRENT_DATE
+        last_reset_date = CURRENT_DATE,
+        status = 'Active'
       WHERE 
         request_id IN (
           SELECT id 
@@ -70,7 +112,7 @@ const resetDailyUsageCounters = async () => {
           WHERE enable_daily_usage = true 
             AND status NOT IN ('Cancelled', 'Expired')
         )
-      RETURNING id, request_id
+      RETURNING id, request_id, azure_username
       `
     );
 
@@ -79,7 +121,9 @@ const resetDailyUsageCounters = async () => {
     if (result.rowCount > 0) {
       // Log the reset action for each user
       for (const row of result.rows) {
-        console.log(`[ACCESS_RESTORED] User ${row.id} (Request ${row.request_id}) access restored after daily reset`);
+        console.log(
+          `[ACCESS_RESTORED] User ${row.id} (${row.azure_username || 'Unknown'}) - Request ${row.request_id} access restored after daily reset`
+        );
       }
 
       // Log the reset action in enforcement logs
@@ -96,7 +140,7 @@ const resetDailyUsageCounters = async () => {
           request_id,
           id,
           'daily_reset',
-          '{"message": "Daily usage counters reset", "action": "access_restored"}',
+          '{"message": "Daily usage counters reset", "action": "access_restored", "azure_account_enabled": "true"}',
           NOW()
         FROM azure_users
         WHERE id = ANY($1)
@@ -118,10 +162,16 @@ const startUsageScheduler = () => {
   console.log('Starting usage schedulers...');
 
   // Monitor active sessions every minute
-  cron.schedule('* * * * *', () => {
-    monitorActiveSessions().catch((error) => {
+  cron.schedule('* * * * *', async () => {
+    try {
+      // First, detect new Azure Portal logins and create sessions
+      await monitorAzureSignIns();
+
+      // Then, monitor existing active sessions for usage limits
+      await monitorActiveSessions();
+    } catch (error) {
       console.error('Error in active session monitor job:', error);
-    });
+    }
   });
   console.log('Active session monitor scheduled (every minute)');
 

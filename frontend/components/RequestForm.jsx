@@ -181,10 +181,15 @@ export default function RequestForm({
             <div className="panel__heading" style={{ marginBottom: 14 }}>
               <div>
                 <h3>Roles</h3>
-                <p>Select one or more Azure RBAC roles for each chosen service.</p>
+                <p>Select Azure RBAC roles for each service or view auto-assigned default roles.</p>
               </div>
               <span className="helper-badge">
-                {selectedServiceRoleEntries.reduce((count, entry) => count + entry.selectedRoles.length, 0)} selected
+                {selectedServiceRoleEntries.reduce((count, entry) => {
+                  if (!entry.enableRoleSelection && entry.defaultRole) {
+                    return count + 1; // Count auto-assigned
+                  }
+                  return count + entry.selectedRoles.length; // Count manual
+                }, 0)} assigned
               </span>
             </div>
 
@@ -196,38 +201,57 @@ export default function RequestForm({
                       <h4 style={{ marginBottom: 4 }}>{entry.name}</h4>
                       <p>Selected service</p>
                     </div>
-                    <span className="helper-badge">
-                      {entry.selectedRoles.length > 0 ? `${entry.selectedRoles.length} selected` : 'No roles selected'}
-                    </span>
+                    {entry.enableRoleSelection ? (
+                      <span className="helper-badge">
+                        {entry.selectedRoles.length > 0 ? `${entry.selectedRoles.length} selected` : 
+                         entry.roleRequired ? 'Required' : 'Optional'}
+                      </span>
+                    ) : (
+                      <span className="helper-badge">Auto-assigned</span>
+                    )}
                   </div>
 
                   {entry.loading ? (
                     <p className="inline-note">Loading role mappings...</p>
-                  ) : entry.backendServiceId ? (
-                    entry.availableRoles.length > 0 ? (
-                      <div className="step-stack" style={{ gap: 10 }}>
-                        {entry.availableRoles.map((role) => {
-                          const checked = entry.selectedRoles.includes(role.azure_role);
-
-                          return (
-                            <label key={role.id} className="field" style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
-                              <input
-                                type="checkbox"
-                                checked={checked}
-                                onChange={() => onToggleServiceRole?.(entry.backendServiceId, role.azure_role)}
-                              />
-                              <span className="field__label" style={{ margin: 0 }}>
-                                {role.azure_role}
-                              </span>
-                            </label>
-                          );
-                        })}
-                      </div>
-                    ) : (
-                      <p className="inline-note">No role mappings are configured for this service.</p>
-                    )
-                  ) : (
+                  ) : !entry.backendServiceId ? (
                     <p className="inline-note">This selected service does not map to a provisionable backend service.</p>
+                  ) : !entry.enableRoleSelection ? (
+                    // Auto-assigned default role
+                    <div className="surface" style={{ padding: 12, backgroundColor: '#f0f9ff', border: '1px solid #0ea5e9' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+                        <span style={{ fontSize: '1.2em' }}>✓</span>
+                        <strong>{entry.defaultRole || 'Default role'}</strong>
+                      </div>
+                      <p className="inline-note" style={{ margin: 0 }}>
+                        This role will be automatically assigned during provisioning.
+                      </p>
+                    </div>
+                  ) : entry.availableRoles.length > 0 ? (
+                    // Manual role selection
+                    <div className="step-stack" style={{ gap: 10 }}>
+                      {entry.availableRoles.map((role) => {
+                        const checked = entry.selectedRoles.includes(role.azure_role);
+
+                        return (
+                          <label key={role.id} className="field" style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              onChange={() => onToggleServiceRole?.(entry.backendServiceId, role.azure_role)}
+                            />
+                            <span className="field__label" style={{ margin: 0 }}>
+                              {role.azure_role}
+                            </span>
+                          </label>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <p className="inline-note">
+                      {entry.roleRequired 
+                        ? 'No role mappings configured for this service.' 
+                        : 'No role mappings configured. Roles are optional for this service.'}
+                    </p>
                   )}
                 </div>
               ))}
