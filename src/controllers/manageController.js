@@ -14,18 +14,26 @@ const getSessionToken = (req) => {
 
 const exchangeToken = async (req, res, next) => {
   try {
-    const token = typeof req.query.token === 'string' ? req.query.token.trim() : '';
+    const token = typeof req.query.token === 'string'
+      ? req.query.token.trim()
+      : String(req.body?.token || '').trim();
+    const username = String(req.body?.username || '').trim();
+    const password = String(req.body?.password || '');
 
     if (!token) {
       throw new AppError('token is required.', 400);
     }
 
-    const result = await managePortalService.exchangeAccessToken(token);
+    const result = await managePortalService.exchangeAccessToken(token, {
+      username,
+      password
+    });
 
     res.status(200).json({
       success: true,
       requestId: result.requestId,
       customerEmail: result.customerEmail,
+      admin: result.admin,
       resourceGroup: result.resourceGroup,
       sessionToken: result.sessionToken,
       expiresAt: result.expiresAt,

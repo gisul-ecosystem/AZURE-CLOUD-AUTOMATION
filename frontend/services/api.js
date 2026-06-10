@@ -205,6 +205,17 @@ export async function exchangeManageToken(token) {
   return requestJson(`/api/manage/token?token=${encodeURIComponent(token)}`);
 }
 
+export async function loginManagePortal({ token, username, password }) {
+  return requestJson('/api/manage/login', {
+    method: 'POST',
+    body: {
+      token,
+      username,
+      password
+    }
+  });
+}
+
 export async function getManageRequest(sessionToken, requestId) {
   return requestJson(`/api/manage/request/${encodeURIComponent(requestId)}?session=${encodeURIComponent(sessionToken)}`);
 }

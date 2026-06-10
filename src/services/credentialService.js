@@ -176,6 +176,7 @@ const sendCredentials = async (requestId) => {
   const request = credentials.request;
   const users = credentials.users;
   const portalLink = portal.manageUrl;
+  const adminCredentials = portal.adminCredentials;
 
   await upsertDeliveryRecord(
     db,
@@ -187,6 +188,7 @@ const sendCredentials = async (requestId) => {
   const html = buildCredentialEmailHtml({
     requestId,
     users,
+    adminCredentials,
     portalLink,
     expiresAt: portal.expiresAt.toISOString()
   });
@@ -213,6 +215,7 @@ const sendCredentials = async (requestId) => {
       success: true,
       requestId,
       portalLink,
+      adminUsername: adminCredentials?.username || null,
       usersSent: users.length
     };
   } catch (error) {
