@@ -72,7 +72,7 @@ const escapeHtml = (value) =>
     .replaceAll('"', '&quot;')
     .replaceAll("'", '&#39;');
 
-const buildCredentialEmailHtml = ({ requestId, users, portalLink, expiresAt }) => {
+const buildCredentialEmailHtml = ({ requestId, users, adminCredentials, portalLink, expiresAt }) => {
   const rowsHtml = users
     .map(
       (user, index) => `
@@ -111,12 +111,22 @@ const buildCredentialEmailHtml = ({ requestId, users, portalLink, expiresAt }) =
           </table>
           </div>
           <div style="margin-top: 24px; padding: 20px; border: 1px solid #e5e7eb; border-radius: 14px; background: #f9fafb;">
-            <p style="margin: 0 0 12px; font-size: 14px; font-weight: 700; color: #374151;">Manage Users</p>
+            <p style="margin: 0 0 12px; font-size: 14px; font-weight: 700; color: #374151;">Admin Portal Login</p>
+            <table style="border-collapse: collapse; width: 100%; margin: 0 0 16px;">
+              <tr>
+                <td style="padding: 8px 0; color: #6b7280; width: 150px;">Username</td>
+                <td style="padding: 8px 0; font-family: Consolas, monospace; color: #111827;">${escapeHtml(adminCredentials?.username || '')}</td>
+              </tr>
+              <tr>
+                <td style="padding: 8px 0; color: #6b7280;">Temporary Password</td>
+                <td style="padding: 8px 0; font-family: Consolas, monospace; color: #111827;">${escapeHtml(adminCredentials?.temporaryPassword || '')}</td>
+              </tr>
+            </table>
             <a
               href="${escapeHtml(portalLink)}"
               style="display: inline-block; background: #111827; color: #ffffff; text-decoration: none; padding: 12px 18px; border-radius: 10px; font-weight: 700;"
             >
-              Manage Access
+              Open Admin Portal
             </a>
             <p style="margin: 14px 0 0; font-size: 14px; word-break: break-all;">
               <a href="${escapeHtml(portalLink)}" style="color: #2563eb;">${escapeHtml(portalLink)}</a>
@@ -126,7 +136,7 @@ const buildCredentialEmailHtml = ({ requestId, users, portalLink, expiresAt }) =
             This secure link expires in 7 days.
           </p>
           <p style="margin: 8px 0 0; font-size: 13px; color: #6b7280;">
-            Keep credentials confidential.
+            Use the temporary admin credentials above to sign in before managing users.
           </p>
         </div>
       </body>

@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 const db = require('../db/postgres');
 const AppError = require('../utils/AppError');
+const adminAuthService = require('./adminAuthService');
 const { createGraphClient } = require('../provisioners/azure/userProvisioner');
 const {
   buildResourceGroupScope,
@@ -290,6 +291,10 @@ const issueAccessPortalTokenForRequest = async (requestId) => {
   const rawToken = crypto.randomUUID();
   const tokenHash = sha256Hex(rawToken);
   const expiresAt = new Date(Date.now() + ACCESS_TOKEN_TTL_MS);
+  const adminCredentials = await adminAuthService.issueTemporaryAdminCredentials({
+    email: request.customer_email,
+    name: request.customer_email
+  });
 
   const tokenInsert = `
     INSERT INTO access_portal_tokens(
@@ -336,13 +341,14 @@ const issueAccessPortalTokenForRequest = async (requestId) => {
   return {
     requestId,
     customerEmail: request.customer_email,
+    adminCredentials,
     resourceGroup: null,
     manageUrl,
     expiresAt
   };
 };
 
-const exchangeAccessToken = async (rawToken) => {
+const exchangeAccessToken = async (rawToken, credentials = {}) => {
   const token = String(rawToken || '').trim();
 
   if (!token) {
@@ -383,6 +389,12 @@ const exchangeAccessToken = async (rawToken) => {
     if (new Date(portalToken.expires_at).getTime() <= Date.now()) {
       throw new AppError('Access link has expired.', 401);
     }
+
+    const admin = await adminAuthService.verifyAdminCredentials({
+      email: portalToken.customer_email,
+      username: credentials.username,
+      password: credentials.password
+    });
 
     const sessionToken = crypto.randomUUID();
     const sessionHash = sha256Hex(sessionToken);
@@ -445,7 +457,9 @@ const exchangeAccessToken = async (rawToken) => {
       action: 'portal_token_consumed',
       details: {
         expiresAt: sessionExpiresAt.toISOString(),
-        userId
+        userId,
+        adminId: admin.id,
+        adminUsername: admin.username
       }
     });
 
@@ -454,12 +468,14 @@ const exchangeAccessToken = async (rawToken) => {
     logManagePortalEvent('info', 'portal_token_consumed', {
       requestId: portalToken.request_id,
       customerEmail: portalToken.customer_email,
-      userId
+      userId,
+      adminId: admin.id
     });
 
     return {
       requestId: portalToken.request_id,
       customerEmail: portalToken.customer_email,
+      admin,
       resourceGroup,
       sessionToken,
       expiresAt: sessionExpiresAt,

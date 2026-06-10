@@ -4,8 +4,8 @@ import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import {
   deleteManageUser,
-  exchangeManageToken,
   getManageRequest,
+  loginManagePortal,
   updateManageUserRoles,
   startUsageSession,
   getUsageStatus
@@ -43,6 +43,7 @@ const parseRoleInput = (value) =>
 
 export default function ManageUsersClient() {
   const [sessionToken, setSessionToken] = useState('');
+  const [portalToken, setPortalToken] = useState('');
   const [requestId, setRequestId] = useState('');
   const [resourceGroup, setResourceGroup] = useState('');
   const [customerEmail, setCustomerEmail] = useState('');
@@ -54,6 +55,8 @@ export default function ManageUsersClient() {
   const [action, setAction] = useState(null);
   const [activeUserId, setActiveUserId] = useState('');
   const [draftRoles, setDraftRoles] = useState('');
+  const [adminUsername, setAdminUsername] = useState('');
+  const [adminPassword, setAdminPassword] = useState('');
 
   const persistSessionToken = (value) => {
     setSessionToken(value);
@@ -134,6 +137,32 @@ export default function ManageUsersClient() {
     }
   };
 
+  const completePortalLogin = async (bootstrapData) => {
+    const token = bootstrapData.sessionToken || '';
+    const activeRequestId = String(bootstrapData.requestId || '');
+    const activeUserId = String(bootstrapData.userId || '');
+
+    if (!token) {
+      throw new Error('Access portal session could not be created.');
+    }
+
+    if (!activeRequestId) {
+      throw new Error('Access request is unavailable.');
+    }
+
+    persistSessionToken(token);
+    persistRequestId(activeRequestId);
+    persistResourceGroup(bootstrapData.resourceGroup || '');
+    persistCustomerEmail(bootstrapData.customerEmail || '');
+
+    if (activeUserId) {
+      persistUserId(activeUserId);
+      await autoStartUsageSession(activeRequestId, activeUserId);
+    }
+
+    await loadUsers(token, activeRequestId);
+  };
+
   useEffect(() => {
     const boot = async () => {
       setLoading(true);
@@ -152,9 +181,12 @@ export default function ManageUsersClient() {
           typeof window !== 'undefined' ? window.sessionStorage.getItem(STORAGE_KEY_USER_ID) || '' : '';
         const params = new URLSearchParams(window.location.search);
         const rawToken = params.get('token') || '';
-        const tokenToUse = rawToken || existingToken;
 
-        if (!tokenToUse) {
+        if (rawToken) {
+          setPortalToken(rawToken);
+        }
+
+        if (!rawToken && !existingToken) {
           throw new Error('Missing access token. Open the link from your email.');
         }
 
@@ -163,22 +195,8 @@ export default function ManageUsersClient() {
         let activeUserId = existingUserId;
 
         if (!existingToken && rawToken) {
-          const bootstrapData = await exchangeManageToken(rawToken);
-          token = bootstrapData.sessionToken || '';
-          activeRequestId = String(bootstrapData.requestId || '');
-          activeUserId = String(bootstrapData.userId || '');
-
-          if (!token) {
-            throw new Error('Access portal session could not be created.');
-          }
-
-          persistSessionToken(token);
-          persistRequestId(activeRequestId);
-          persistResourceGroup(bootstrapData.resourceGroup || '');
-          persistCustomerEmail(bootstrapData.customerEmail || '');
-          if (activeUserId) {
-            persistUserId(activeUserId);
-          }
+          setLoading(false);
+          return;
         }
 
         if (!token) {
@@ -218,6 +236,35 @@ export default function ManageUsersClient() {
 
     boot();
   }, []);
+
+  const handleAdminLogin = async (event) => {
+    event.preventDefault();
+
+    if (!portalToken || !adminUsername.trim() || !adminPassword) {
+      setError('Enter the admin username and temporary password from your email.');
+      return;
+    }
+
+    setLoading(true);
+    setError('');
+
+    try {
+      const bootstrapData = await loginManagePortal({
+        token: portalToken,
+        username: adminUsername,
+        password: adminPassword
+      });
+
+      setAdminPassword('');
+      await completePortalLogin(bootstrapData);
+    } catch (loginError) {
+      if (!handleAccessError(loginError)) {
+        setError(loginError.message || 'Unable to sign in to the admin portal.');
+      }
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const refreshUsers = async () => {
     if (!sessionToken || !requestId) {
@@ -299,6 +346,51 @@ export default function ManageUsersClient() {
   };
 
   const activeUser = users.find((user) => String(user.id) === String(activeUserId)) || null;
+
+  if (!sessionToken && portalToken) {
+    return (
+      <main className="app-shell page-shell manage-auth-shell">
+        <section className="panel manage-auth-panel">
+          <div className="panel__inner">
+            <div className="panel__heading">
+              <div>
+                <h1>Admin Portal Login</h1>
+                <p>Sign in with the temporary admin credentials from your email.</p>
+              </div>
+              <span className="helper-badge">Secure Link</span>
+            </div>
+
+            {error ? <div className="error-box">{error}</div> : null}
+
+            <form className="manage-auth-form" onSubmit={handleAdminLogin}>
+              <label className="field">
+                <span className="field__label">Admin Username</span>
+                <input
+                  autoComplete="username"
+                  value={adminUsername}
+                  onChange={(event) => setAdminUsername(event.target.value)}
+                  placeholder="admin username"
+                />
+              </label>
+              <label className="field">
+                <span className="field__label">Temporary Password</span>
+                <input
+                  autoComplete="current-password"
+                  type="password"
+                  value={adminPassword}
+                  onChange={(event) => setAdminPassword(event.target.value)}
+                  placeholder="temporary password"
+                />
+              </label>
+              <button type="submit" className="btn btn--primary" disabled={loading}>
+                {loading ? 'Signing in...' : 'Open Admin Portal'}
+              </button>
+            </form>
+          </div>
+        </section>
+      </main>
+    );
+  }
 
   return (
     <main className="app-shell page-shell manage-users-shell">
