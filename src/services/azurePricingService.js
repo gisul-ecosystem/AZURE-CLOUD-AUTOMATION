@@ -3,6 +3,7 @@ const { getAzureServiceName } = require('./servicePricingMap');
 
 const CACHE_TTL_MS = 5 * 60 * 1000;
 const pricingCache = new Map();
+const filterCache = new Map();
 
 const DEFAULT_LOCATION = process.env.AZURE_PRICING_DEFAULT_REGION || 'centralindia';
 const PRICING_API_URL = 'https://prices.azure.com/api/retail/prices';
@@ -48,6 +49,27 @@ const setCachedPrice = (cacheKey, value) => {
   });
 };
 
+const getCachedFilterItems = (filter) => {
+  const cachedEntry = filterCache.get(filter);
+  if (!cachedEntry) {
+    return null;
+  }
+
+  if (cachedEntry.expiresAt <= Date.now()) {
+    filterCache.delete(filter);
+    return null;
+  }
+
+  return cachedEntry.value;
+};
+
+const setCachedFilterItems = (filter, value) => {
+  filterCache.set(filter, {
+    value,
+    expiresAt: Date.now() + CACHE_TTL_MS
+  });
+};
+
 const selectBestPrice = (items) => {
   if (!Array.isArray(items) || items.length === 0) {
     return null;
@@ -69,21 +91,78 @@ const selectBestPrice = (items) => {
   }, null);
 };
 
-const fetchAzureRetailPrices = async (serviceName, location) => {
-  const filter = `serviceName eq '${escapeODataString(serviceName)}' and armRegionName eq '${escapeODataString(location)}'`;
-  const items = [];
+const retailPriceToDaily = (retailPrice, unitOfMeasure) => {
+  const price = Number(retailPrice);
+  if (!Number.isFinite(price) || price < 0) {
+    return 0;
+  }
 
+  const unit = String(unitOfMeasure || '').toLowerCase();
+
+  if (unit.includes('hour')) {
+    return price * 24;
+  }
+
+  if (unit.includes('month')) {
+    return price / 30;
+  }
+
+  if (unit.includes('day')) {
+    return price;
+  }
+
+  if (unit.includes('year')) {
+    return price / 365;
+  }
+
+  return price;
+};
+
+const selectLowestDailyPrice = (items) => {
+  if (!Array.isArray(items) || items.length === 0) {
+    return 0;
+  }
+
+  const linuxPreferred = items.filter((item) => {
+    const label = `${item?.productName || ''} ${item?.skuName || ''} ${item?.meterName || ''}`;
+    return !/windows/i.test(label);
+  });
+  const candidates = linuxPreferred.length > 0 ? linuxPreferred : items;
+
+  let lowest = Number.POSITIVE_INFINITY;
+
+  for (const item of candidates) {
+    const dailyPrice = retailPriceToDaily(item.retailPrice, item.unitOfMeasure);
+    if (dailyPrice < lowest) {
+      lowest = dailyPrice;
+    }
+  }
+
+  return Number.isFinite(lowest) ? lowest : 0;
+};
+
+const fetchRetailPriceItems = async (filter) => {
+  const normalizedFilter = String(filter || '').trim();
+  if (!normalizedFilter) {
+    return [];
+  }
+
+  const cachedItems = getCachedFilterItems(normalizedFilter);
+  if (cachedItems) {
+    return cachedItems;
+  }
+
+  const items = [];
   let nextUrl = PRICING_API_URL;
-  let nextParams = { $filter: filter };
+  let nextParams = { $filter: normalizedFilter };
 
   while (nextUrl) {
     const response = await axios.get(nextUrl, {
       params: nextParams,
-      timeout: 10000
+      timeout: 20000
     });
 
     const payload = response.data || {};
-
     if (Array.isArray(payload.Items)) {
       items.push(...payload.Items);
     }
@@ -92,7 +171,13 @@ const fetchAzureRetailPrices = async (serviceName, location) => {
     nextParams = undefined;
   }
 
+  setCachedFilterItems(normalizedFilter, items);
   return items;
+};
+
+const fetchAzureRetailPrices = async (serviceName, location) => {
+  const filter = `serviceName eq '${escapeODataString(serviceName)}' and armRegionName eq '${escapeODataString(location)}' and priceType eq 'Consumption'`;
+  return fetchRetailPriceItems(filter);
 };
 
 const getAzureRetailPrice = async (serviceName, location) => {
@@ -165,5 +250,8 @@ const getAzureRetailPrice = async (serviceName, location) => {
 };
 
 module.exports = {
-  getAzureRetailPrice
+  getAzureRetailPrice,
+  fetchRetailPriceItems,
+  retailPriceToDaily,
+  selectLowestDailyPrice
 };

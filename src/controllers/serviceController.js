@@ -4,7 +4,8 @@ const apiResponse = require('../utils/apiResponse');
 
 const allowedQueryParams = new Set(['category', 'location']);
 const allowedPricingQueryParams = new Set(['location']);
-const allowedAvailableLocationsQueryParams = new Set(['serviceIds']);
+const allowedAvailableLocationsQueryParams = new Set(['serviceIds', 'instanceSelections']);
+const allowedAvailableInstancesQueryParams = new Set(['location', 'serviceIds']);
 
 const validateQueryParams = (query) => {
   const queryKeys = Object.keys(query);
@@ -33,6 +34,7 @@ const getServices = async (req, res, next) => {
 
     const category = req.query.category ? req.query.category.trim() : undefined;
     const location = req.query.location ? String(req.query.location).trim().toLowerCase() : undefined;
+    const hasFilters = Boolean(category || location);
 
     console.log(
       JSON.stringify({
@@ -42,6 +44,22 @@ const getServices = async (req, res, next) => {
         timestamp: new Date().toISOString()
       })
     );
+
+    if (!hasFilters) {
+      const bundle = await serviceService.getServiceBundle();
+
+      res.status(200).json({
+        success: true,
+        categories: bundle.categories,
+        services: bundle.services,
+        roles: bundle.roles,
+        regions: bundle.regions,
+        instances: bundle.instances,
+        instanceRoleMappings: bundle.instanceRoleMappings || [],
+        count: bundle.services.length
+      });
+      return;
+    }
 
     const services = await serviceService.getActiveServices(category, location);
 
@@ -164,11 +182,41 @@ const getAvailableLocations = async (req, res, next) => {
 
     const rawServiceIds = req.body?.serviceIds ?? req.query.serviceIds;
     const serviceIds = normalizeServiceIds(rawServiceIds);
-    const locations = await serviceService.getAvailableLocations(serviceIds);
+    const instanceSelections =
+      req.body?.selectedInstances ?? req.body?.instanceSelections ?? req.query.instanceSelections;
+    const locations = await serviceService.getAvailableLocations(serviceIds, instanceSelections);
 
     res.status(200).json({
       success: true,
       locations
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+const getAvailableInstances = async (req, res, next) => {
+  try {
+    const queryKeys = Object.keys(req.query);
+    const invalidQueryParams = queryKeys.filter((key) => !allowedAvailableInstancesQueryParams.has(key));
+
+    if (invalidQueryParams.length > 0) {
+      throw new AppError(`Invalid query parameter(s): ${invalidQueryParams.join(', ')}`, 400);
+    }
+
+    const location = req.query.location ? String(req.query.location).trim() : '';
+    if (!location) {
+      throw new AppError('location is required.', 400);
+    }
+
+    const serviceIds = normalizeServiceIds(req.query.serviceIds);
+    const instances = await serviceService.getAvailableInstances(location, serviceIds);
+
+    res.status(200).json({
+      success: true,
+      location,
+      instances,
+      count: instances.length
     });
   } catch (error) {
     next(error);
@@ -200,5 +248,6 @@ module.exports = {
   getCatalogServices,
   getLocations,
   getAvailableLocations,
+  getAvailableInstances,
   getServiceRoles
 };

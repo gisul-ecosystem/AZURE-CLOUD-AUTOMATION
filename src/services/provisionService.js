@@ -1,6 +1,7 @@
 const db = require('../db/postgres');
 const AppError = require('../utils/AppError');
 const { provisionResourceGroup } = require('../provisioners/azure/resourceGroupProvisioner');
+const { assertProvisionableLocation } = require('./azureLocationService');
 
 const STATUS_COMPLETED = 'Completed';
 
@@ -120,6 +121,7 @@ const provisionRequestResourceGroup = async (requestId) => {
 
     const resourceGroupName = `RG-CUST-${requestId}`;
     const location = request.location.trim();
+    assertProvisionableLocation(location);
 
     logProvisionEvent('info', 'provision_request_started', {
       requestId,

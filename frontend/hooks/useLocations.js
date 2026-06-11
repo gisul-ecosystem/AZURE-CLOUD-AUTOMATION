@@ -59,9 +59,10 @@ const normalizeServiceIds = (serviceIds) =>
     )
   ).sort((left, right) => left - right);
 
-export default function useLocations(serviceIds = []) {
+export default function useLocations(serviceIds = [], instanceSelections = '') {
   const resolvedServiceIds = normalizeServiceIds(serviceIds);
-  const cacheKey = resolvedServiceIds.join(',');
+  const resolvedInstanceSelections = String(instanceSelections || '').trim();
+  const cacheKey = `${resolvedServiceIds.join(',')}|${resolvedInstanceSelections}`;
   const [locations, setLocations] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -90,7 +91,9 @@ export default function useLocations(serviceIds = []) {
       setLoading(true);
 
       try {
-        const nextLocations = normalizeLocations(await getAvailableLocations(resolvedServiceIds));
+        const nextLocations = normalizeLocations(
+          await getAvailableLocations(resolvedServiceIds, resolvedInstanceSelections)
+        );
 
         if (cancelled) {
           return;
@@ -121,7 +124,7 @@ export default function useLocations(serviceIds = []) {
     return () => {
       cancelled = true;
     };
-  }, [cacheKey, refreshTick, resolvedServiceIds.length]);
+  }, [cacheKey, refreshTick, resolvedInstanceSelections, resolvedServiceIds.length]);
 
   const refresh = () => {
     if (cacheKey) {

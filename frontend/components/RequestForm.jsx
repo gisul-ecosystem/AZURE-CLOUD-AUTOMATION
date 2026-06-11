@@ -25,10 +25,12 @@ const getRegionRankLabel = (index) => {
 export default function RequestForm({
   form,
   locations = [],
-  serviceGroups = [],
+  categories = [],
   services = [],
   selectedServiceIds = [],
   selectedServiceRoleEntries = [],
+  selectedServiceInstanceEntries = [],
+  onSelectServiceInstance,
   onToggleServiceRole,
   onFieldChange,
   onSelectionChange,
@@ -39,6 +41,8 @@ export default function RequestForm({
   locationsLoading = false,
   locationsError = '',
   servicesError = '',
+  instancesLoading = false,
+  instancesError = '',
   accountCount = 0,
   durationHours = 0,
   submitLabel = 'Create Request'
@@ -161,7 +165,7 @@ export default function RequestForm({
           </div>
 
           <ServiceSelector
-            serviceGroups={serviceGroups}
+            categories={categories}
             services={services}
             selectedServiceIds={selectedServiceIds}
             onSelectionChange={onSelectionChange}
@@ -172,9 +176,82 @@ export default function RequestForm({
             location={form.location}
           />
           <p className="inline-note" style={{ marginTop: 12 }}>
-            Some services may not support automated provisioning.
+            Users receive permission to create resources in the resource group, constrained by the selected instance policies.
           </p>
         </div>
+
+        {selectedServiceInstanceEntries.some((entry) => entry.supportsInstances) ? (
+          <div className="surface" style={{ padding: 16 }}>
+            <div className="panel__heading" style={{ marginBottom: 14 }}>
+              <div>
+                <h3>Instances</h3>
+                <p>
+                  Select the size, tier, or plan users are allowed to create for each Azure service.
+                  {form.location
+                    ? ` Regions are loaded from Azure for your subscription.`
+                    : ''}
+                </p>
+              </div>
+              <span className="helper-badge">
+                {selectedServiceInstanceEntries.filter((entry) => entry.selectedInstance).length} selected
+              </span>
+            </div>
+
+            {instancesError ? (
+              <p className="inline-note" style={{ marginBottom: 12 }}>
+                Could not verify regional instance availability. Showing catalog options instead.
+              </p>
+            ) : null}
+
+            <div className="step-stack">
+              {selectedServiceInstanceEntries
+                .filter((entry) => entry.supportsInstances)
+                .map((entry) => (
+                  <div key={entry.backendServiceId} className="surface" style={{ padding: 16 }}>
+                    <div className="panel__heading" style={{ marginBottom: 12 }}>
+                      <div>
+                        <h4 style={{ marginBottom: 4 }}>{entry.name}</h4>
+                        <p>
+                          {instancesLoading
+                            ? 'Loading sizes available in this region...'
+                            : entry.availableInstances.length === 0
+                              ? 'No instance options are available for this region.'
+                              : 'Choose an instance option'}
+                        </p>
+                      </div>
+                    </div>
+
+                    <label className="field">
+                      <span className="field__label">Instance option</span>
+                      <select
+                        value={entry.selectedInstance || ''}
+                        onChange={(event) =>
+                          onSelectServiceInstance?.(entry.backendServiceId, event.target.value)
+                        }
+                        required
+                        disabled={instancesLoading || entry.availableInstances.length === 0}
+                      >
+                        <option value="">
+                          {instancesLoading ? 'Loading...' : 'Select instance...'}
+                        </option>
+                        {entry.availableInstances.map((instance) => {
+                          const mappedRole = entry.resolveInstanceRole?.(instance.option_name);
+
+                          return (
+                            <option key={instance.id} value={instance.option_name}>
+                              {mappedRole
+                                ? `${instance.option_name} → ${mappedRole}`
+                                : instance.option_name}
+                            </option>
+                          );
+                        })}
+                      </select>
+                    </label>
+                  </div>
+                ))}
+            </div>
+          </div>
+        ) : null}
 
         {selectedServiceRoleEntries.length > 0 ? (
           <div className="surface" style={{ padding: 16 }}>
@@ -215,15 +292,17 @@ export default function RequestForm({
                     <p className="inline-note">Loading role mappings...</p>
                   ) : !entry.backendServiceId ? (
                     <p className="inline-note">This selected service does not map to a provisionable backend service.</p>
-                  ) : !entry.enableRoleSelection ? (
-                    // Auto-assigned default role
+                    ) : !entry.enableRoleSelection ? (
+                    // Auto-assigned default or tier-driven role
                     <div className="surface" style={{ padding: 12, backgroundColor: '#f0f9ff', border: '1px solid #0ea5e9' }}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
                         <span style={{ fontSize: '1.2em' }}>✓</span>
                         <strong>{entry.defaultRole || 'Default role'}</strong>
                       </div>
                       <p className="inline-note" style={{ margin: 0 }}>
-                        This role will be automatically assigned during provisioning.
+                        {entry.tierAutomated
+                          ? `Role is automatically assigned from the selected instance tier${entry.selectedInstance ? ` (${entry.selectedInstance})` : ''}. Azure Policy enforces the matching capacity mode.`
+                          : 'This role will be automatically assigned during provisioning.'}
                       </p>
                     </div>
                   ) : entry.availableRoles.length > 0 ? (
@@ -287,7 +366,7 @@ export default function RequestForm({
                     const label = region.display_location || region.label || region.arm_region_name || region.value;
                     return (
                       <option key={region.arm_region_name || region.value} value={region.arm_region_name || region.value}>
-                        {getRegionRankLabel(index)} {label} ({formatMoney(region.basePrice, region.currency)})
+                        {getRegionRankLabel(index)} {label} ({formatMoney(region.basePrice)}/day)
                       </option>
                     );
                   })
@@ -295,7 +374,7 @@ export default function RequestForm({
               </select>
               {locationsError ? <span className="inline-note">{locationsError}</span> : null}
               <span className="inline-note">
-                Regions are sorted by the lowest combined price for the selected services.
+                Daily Azure retail estimate for the selected services and instance sizes. Final total also includes users and date range.
               </span>
             </label>
           </div>
