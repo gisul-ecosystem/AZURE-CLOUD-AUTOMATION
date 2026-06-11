@@ -1,6 +1,8 @@
 
 const db = require('../db/postgres');
 const pricingService = require('./pricingService');
+const { assertProvisionableLocation } = require('./azureLocationService');
+const { applyTierRolesToAssignments } = require('./instanceRoleMappingService');
 
 async function createRequest({
   customerEmail,
@@ -8,6 +10,7 @@ async function createRequest({
   location,
   serviceIds,
   selectedRoles,
+  selectedInstances,
   startDate,
   endDate,
   enableDailyUsage,
@@ -19,6 +22,8 @@ async function createRequest({
   try {
 
     await client.query('BEGIN');
+
+    assertProvisionableLocation(location);
 
     // ==========================
     // Resolve incoming serviceIds
@@ -183,7 +188,9 @@ async function createRequest({
           serviceIds:
             validServiceIds,
 
-          client
+          selectedInstances: Array.isArray(selectedInstances) ? selectedInstances : [],
+
+          selectedRoles: Array.isArray(selectedRoles) ? selectedRoles : []
 
         });
 
@@ -329,6 +336,34 @@ async function createRequest({
 
 
     // ==========================
+    // Save Selected Instances
+    // ==========================
+
+    for (const item of selectedInstances || []) {
+      const sid = Number(item.serviceId);
+      const instanceOption = String(item.instanceOption || '').trim();
+
+      if (!validServiceIds.includes(sid) || !instanceOption) {
+        continue;
+      }
+
+      await client.query(
+        `
+          INSERT INTO request_service_instances (
+            request_id,
+            service_id,
+            instance_option
+          )
+          VALUES ($1, $2, $3)
+          ON CONFLICT (request_id, service_id)
+          DO UPDATE SET
+            instance_option = EXCLUDED.instance_option
+        `,
+        [requestId, sid, instanceOption]
+      );
+    }
+
+    // ==========================
     // Save Selected Roles
     // Auto-append default roles for services with enable_role_selection=false
     // ==========================
@@ -401,6 +436,9 @@ async function createRequest({
         console.log(`[SERVICE_SELECTED] Service ${sid} (${config.name}): Role selection enabled`);
       }
     }
+
+    // Tier-automated services: instance selection drives RBAC role (overrides manual picks)
+    await applyTierRolesToAssignments(client, roleAssignments, validServiceIds, selectedInstances);
 
     // Insert all role assignments into database
     for (const [sid, rolesSet] of roleAssignments.entries()) {
@@ -541,12 +579,31 @@ requestId
 
 
 
+const instances =
+await db.query(
+`
+SELECT
+  rsi.service_id,
+  rsi.instance_option,
+  s.name AS service_name
+FROM request_service_instances rsi
+LEFT JOIN services s ON s.id = rsi.service_id
+WHERE rsi.request_id = $1
+`,
+[
+requestId
+]
+);
+
 return{
 
 ...request.rows[0],
 
 services:
-services.rows
+services.rows,
+
+instances:
+instances.rows
 
 };
 

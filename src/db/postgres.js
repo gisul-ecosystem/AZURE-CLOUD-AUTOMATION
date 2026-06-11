@@ -4,17 +4,23 @@ if (!process.env.DATABASE_URL) {
   throw new Error('DATABASE_URL missing');
 }
 
+// Supabase transaction pooler (6543) often hangs with node-pg; use session pooler (5432).
+const connectionString = process.env.DATABASE_URL.replace(
+  /\.pooler\.supabase\.com:6543\//,
+  '.pooler.supabase.com:5432/'
+);
+
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
+  connectionString,
   statement_timeout: 15000,
   query_timeout: 15000,
-  ssl: {
-    rejectUnauthorized: false
-  },
+  ssl: process.env.SUPABASE_DB_SSL === 'false'
+    ? false
+    : { rejectUnauthorized: false },
   family: 4,
-  max: 20,
-  idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 10000
+  max: Number(process.env.SUPABASE_DB_POOL_MAX) || 20,
+  idleTimeoutMillis: Number(process.env.SUPABASE_DB_IDLE_TIMEOUT_MS) || 30000,
+  connectionTimeoutMillis: Number(process.env.SUPABASE_DB_CONNECTION_TIMEOUT_MS) || 10000
 });
 
 pool.on('connect', () => {

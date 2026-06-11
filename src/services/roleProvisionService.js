@@ -1,9 +1,7 @@
 const db = require('../db/postgres');
 const AppError = require('../utils/AppError');
 const { createGraphClient } = require('../provisioners/azure/userProvisioner');
-const {
-  batchAddUsersToGroups
-} = require('../provisioners/azure/graphBatchProvisioner');
+const { batchAddUsersToGroups } = require('../provisioners/azure/graphBatchProvisioner');
 const {
   buildResourceGroupScope,
   createAuthorizationClient,
@@ -208,7 +206,7 @@ const getUserRoleAssignmentsForRequest = async (requestId) => {
       ? 'ura.assignment_kind'
       : schema.hasAssignmentStatus
         ? 'ura.assignment_status AS assignment_kind'
-        : "ura.status AS assignment_kind";
+        : 'ura.status AS assignment_kind';
     const entraGroupIdExpression = schema.hasEntraGroupId
       ? 'ura.entra_group_id'
       : 'NULL::text AS entra_group_id';
@@ -368,6 +366,6 @@ const provisionRolesForRequest = async (requestId) => {
 };
 
 module.exports = {
-  provisionRolesForRequest,
-  getUserRoleAssignmentsForRequest
+  getUserRoleAssignmentsForRequest,
+  provisionRolesForRequest
 };

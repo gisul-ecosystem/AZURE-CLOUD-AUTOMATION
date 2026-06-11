@@ -5,6 +5,7 @@ import {
   fetchProvisionSnapshot,
   provisionResourceGroup,
   provisionRoles,
+  provisionServiceResources,
   provisionUsers,
   sendCredentials
 } from '../services/api';
@@ -17,6 +18,11 @@ const STEP_DEFINITIONS = [
     description: 'Create the Azure resource group in the chosen region.'
   },
   {
+    key: 'services',
+    title: 'Setting Instance Policies',
+    description: 'Apply allowed size, tier, and plan policies so users can create only the selected instances.'
+  },
+  {
     key: 'users',
     title: 'Users Creating',
     description: 'Create the Microsoft Graph users for this request.'
@@ -24,7 +30,7 @@ const STEP_DEFINITIONS = [
   {
     key: 'roles',
     title: 'Assigning Access',
-    description: 'Assign the resolved RBAC roles at resource-group scope.'
+    description: 'Assign RBAC roles on the resource group so users can create resources within policy limits.'
   },
   {
     key: 'credentials',
@@ -48,12 +54,35 @@ const getUsersData = (snapshot) => snapshot?.users?.data || snapshot?.users || n
 const getRolesData = (snapshot) => snapshot?.roles?.data || snapshot?.roles || null;
 const getCredentialsData = (snapshot) => snapshot?.credentials?.data || snapshot?.credentials || null;
 
+const getRequestedInstances = (snapshot) => {
+  const request = getRequestData(snapshot);
+  return Array.isArray(request?.instances) ? request.instances : [];
+};
+
+const getProvisionedServices = (snapshot) => {
+  const services = snapshot?.services;
+  return Array.isArray(services) ? services : [];
+};
+
 const hasResourceGroup = (snapshot) =>
   Boolean(
     getProvisionData(snapshot)?.resourceGroup ||
       getProvisionData(snapshot)?.resourceGroupName ||
       getRequestData(snapshot)?.azure_resource_group_name
   );
+
+const hasServiceInstancesReady = (snapshot) => {
+  const requested = getRequestedInstances(snapshot);
+  if (requested.length === 0) {
+    return hasResourceGroup(snapshot);
+  }
+
+  const provisioned = getProvisionedServices(snapshot).filter((entry) =>
+    ['policy_configured', 'provisioned', 'skipped'].includes(String(entry.status || '').toLowerCase())
+  );
+
+  return provisioned.length >= requested.length;
+};
 
 const getUsersCount = (snapshot) => {
   const usersData = getUsersData(snapshot);
@@ -73,6 +102,7 @@ const getDeliveryStatus = (snapshot) =>
 const hasCompletedFlow = (snapshot) =>
   truthyStatus(getRequestData(snapshot)?.status) === 'completed' &&
   hasResourceGroup(snapshot) &&
+  hasServiceInstancesReady(snapshot) &&
   getUsersCount(snapshot) > 0 &&
   getRolesCount(snapshot) > 0 &&
   truthyStatus(getDeliveryStatus(snapshot)) === 'sent';
@@ -80,12 +110,13 @@ const hasCompletedFlow = (snapshot) =>
 const deriveProgress = (snapshot) => {
   const stepsComplete = [
     hasResourceGroup(snapshot),
+    hasServiceInstancesReady(snapshot),
     getUsersCount(snapshot) > 0,
     getRolesCount(snapshot) > 0,
     truthyStatus(getDeliveryStatus(snapshot)) === 'sent'
   ].filter(Boolean).length;
 
-  return stepsComplete * 25;
+  return stepsComplete * 20;
 };
 
 const deriveStepStates = (snapshot, activeStepKey = '') =>
@@ -94,13 +125,21 @@ const deriveStepStates = (snapshot, activeStepKey = '') =>
 
     if (step.key === 'resource-group') {
       state = hasResourceGroup(snapshot) ? 'complete' : activeStepKey === step.key ? 'active' : 'pending';
+    } else if (step.key === 'services') {
+      state = hasServiceInstancesReady(snapshot)
+        ? 'complete'
+        : activeStepKey === step.key
+          ? 'active'
+          : hasResourceGroup(snapshot)
+            ? 'active'
+            : 'pending';
     } else if (step.key === 'users') {
       state =
         getUsersCount(snapshot) > 0
           ? 'complete'
           : activeStepKey === step.key
             ? 'active'
-            : hasResourceGroup(snapshot)
+            : hasServiceInstancesReady(snapshot)
               ? 'active'
               : 'pending';
     } else if (step.key === 'roles') {
@@ -129,6 +168,7 @@ const deriveStepStates = (snapshot, activeStepKey = '') =>
 const EMPTY_SNAPSHOT = {
   request: null,
   provision: null,
+  services: null,
   users: null,
   roles: null,
   credentials: null
@@ -197,6 +237,11 @@ export function useProvisionFlow(requestId, initialSnapshot = null) {
           action: () => provisionResourceGroup(requestId)
         },
         {
+          key: 'services',
+          title: 'Setting Instance Policies',
+          action: () => provisionServiceResources(requestId)
+        },
+        {
           key: 'users',
           title: 'Users Creating',
           action: () => provisionUsers(requestId)
@@ -217,6 +262,7 @@ export function useProvisionFlow(requestId, initialSnapshot = null) {
         const latestSnapshot = snapshotRef.current;
         const isComplete =
           (step.key === 'resource-group' && hasResourceGroup(latestSnapshot)) ||
+          (step.key === 'services' && hasServiceInstancesReady(latestSnapshot)) ||
           (step.key === 'users' && getUsersCount(latestSnapshot) > 0) ||
           (step.key === 'roles' && getRolesCount(latestSnapshot) > 0) ||
           (step.key === 'credentials' && truthyStatus(getDeliveryStatus(latestSnapshot)) === 'sent');
@@ -304,6 +350,9 @@ export function useProvisionFlow(requestId, initialSnapshot = null) {
         getProvisionData(snapshot)?.resourceGroupName ||
         getRequestData(snapshot)?.azure_resource_group_name ||
         '-',
+      servicesPolicyConfigured: getProvisionedServices(snapshot).filter((entry) =>
+        ['policy_configured', 'provisioned'].includes(String(entry.status || '').toLowerCase())
+      ).length,
       usersCreated: getUsersCount(snapshot),
       rolesAssigned: getRolesCount(snapshot),
       deliveryStatus: getDeliveryStatus(snapshot),
