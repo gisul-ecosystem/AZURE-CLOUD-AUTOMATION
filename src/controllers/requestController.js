@@ -1,6 +1,7 @@
 const AppError = require('../utils/AppError');
 const requestService = require('../services/requestService');
 const { parseFlexibleDateTime } = require('../utils/dateTime');
+const { validateUsageSchedule, getMaxDailyLimitMinutes } = require('../utils/usageSchedule');
 
 const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const allowedRequestFields = new Set([
@@ -14,7 +15,8 @@ const allowedRequestFields = new Set([
   'startDate',
   'endDate',
   'enableDailyUsage',
-  'dailyLimitMinutes'
+  'dailyLimitMinutes',
+  'usageSchedule'
 ]);
 
 const validateRequestPayload = (body) => {
@@ -30,7 +32,8 @@ const validateRequestPayload = (body) => {
     startDate,
     endDate,
     enableDailyUsage,
-    dailyLimitMinutes
+    dailyLimitMinutes,
+    usageSchedule
   } = body;
 
   if (invalidFields.length > 0) {
@@ -71,8 +74,19 @@ const validateRequestPayload = (body) => {
     }
   }
 
-  if (enableDailyUsage === true && !dailyLimitMinutes) {
-    throw new AppError('dailyLimitMinutes is required when enableDailyUsage is true.', 400);
+  if (usageSchedule !== undefined) {
+    if (!usageSchedule || typeof usageSchedule !== 'object') {
+      throw new AppError('usageSchedule must be an object when provided.', 400);
+    }
+
+    const scheduleErrors = validateUsageSchedule(usageSchedule);
+    if (scheduleErrors.length > 0) {
+      throw new AppError(scheduleErrors.join(' '), 400);
+    }
+  }
+
+  if (enableDailyUsage === true && !usageSchedule && !dailyLimitMinutes) {
+    throw new AppError('usageSchedule or dailyLimitMinutes is required when enableDailyUsage is true.', 400);
   }
 
   const invalidServiceId = serviceIds.some((serviceId) => !Number.isInteger(serviceId) || serviceId <= 0);
@@ -172,7 +186,10 @@ const createRequest = async (req, res, next) => {
       enableDailyUsage: req.body.enableDailyUsage === true,
       dailyLimitMinutes: req.body.dailyLimitMinutes
         ? Number(req.body.dailyLimitMinutes)
-        : undefined
+        : req.body.usageSchedule
+          ? getMaxDailyLimitMinutes(req.body.usageSchedule)
+          : undefined,
+      usageSchedule: req.body.usageSchedule || undefined
     };
 
     const result = await requestService.createRequest(payload);

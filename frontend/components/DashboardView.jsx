@@ -58,6 +58,9 @@ export default function DashboardView({ requests = [], error = '', lastUpdated =
           <Link className="btn btn--secondary" href="/dashboard">
             Refresh
           </Link>
+          <Link className="btn btn--ghost" href="/org-admin">
+            Org Admin
+          </Link>
           <Link className="btn btn--primary" href="/request">
             New Request
           </Link>

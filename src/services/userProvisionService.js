@@ -8,13 +8,23 @@ const {
   logAzureUserEvent
 } = require('../provisioners/azure/userProvisioner');
 const { runWithConcurrency } = require('../utils/concurrency');
+const { evaluateUsageAccess } = require('./usageAccessEvaluator');
 
 const STATUS_CREATED = 'Created';
 const DEFAULT_CONCURRENCY = Math.max(1, Number(process.env.BULK_PROVISION_CONCURRENCY || 20));
+const STATUS_BLOCKED = 'Blocked';
 
 const getRequestByIdForUserProvisioning = async (client, requestId) => {
   const query = `
-    SELECT id, account_count, status, expiry_date
+    SELECT
+      id,
+      account_count,
+      status,
+      expiry_date,
+      enable_daily_usage,
+      daily_limit_minutes,
+      usage_schedule,
+      enforce_in_azure
     FROM requests
     WHERE id = $1
     FOR UPDATE
@@ -36,6 +46,49 @@ const getExistingUsersForRequest = async (requestId) => {
   return result.rows;
 };
 
+const getInitialScheduleAccess = (request) => {
+  if (!request?.enable_daily_usage) {
+    return {
+      allowed: true,
+      status: STATUS_CREATED,
+      blockedUntil: null,
+      disableAzureAccount: false,
+      reason: null,
+      message: null
+    };
+  }
+
+  const access = evaluateUsageAccess({
+    request,
+    user: {
+      used_today_minutes: 0,
+      blocked_until: null,
+      last_reset_date: null
+    },
+    currentSessionMinutes: 0
+  });
+
+  if (access.allowed) {
+    return {
+      allowed: true,
+      status: STATUS_CREATED,
+      blockedUntil: null,
+      disableAzureAccount: false,
+      reason: access.reason,
+      message: access.message
+    };
+  }
+
+  return {
+    allowed: false,
+    status: STATUS_BLOCKED,
+    blockedUntil: access.blockedUntil || null,
+    disableAzureAccount: request.enforce_in_azure === true,
+    reason: access.reason,
+    message: access.message
+  };
+};
+
 const insertAzureUsers = async (client, requestId, createdUsers) => {
   const insertQuery = `
     INSERT INTO azure_users (
@@ -43,9 +96,10 @@ const insertAzureUsers = async (client, requestId, createdUsers) => {
       azure_user_id,
       username,
       temporary_password,
-      status
+      status,
+      blocked_until
     )
-    VALUES ($1, $2, $3, $4, $5)
+    VALUES ($1, $2, $3, $4, $5, $6)
   `;
 
   for (const user of createdUsers) {
@@ -54,7 +108,8 @@ const insertAzureUsers = async (client, requestId, createdUsers) => {
       user.azureUserId,
       user.username,
       user.temporaryPassword,
-      STATUS_CREATED
+      user.status,
+      user.blockedUntil
     ]);
   }
 };
@@ -102,11 +157,16 @@ const provisionUsersForRequest = async (requestId) => {
     const { graphClient, subscriptionId } = createGraphClient();
     const verifiedDomain = await getVerifiedDomain(graphClient);
 
+    const initialAccess = getInitialScheduleAccess(request);
+
     logAzureUserEvent('info', 'azure_user_provision_started', {
       requestId,
       subscriptionId,
       accountCount,
-      verifiedDomain
+      verifiedDomain,
+      scheduleAccessAllowed: initialAccess.allowed,
+      scheduleAccessReason: initialAccess.reason,
+      azureAccountDisabledAtCreation: initialAccess.disableAzureAccount
     });
 
     const createdUsers = [];
@@ -116,7 +176,8 @@ const provisionUsersForRequest = async (requestId) => {
       const { username, temporaryPassword, payload } = buildUserPayload({
         requestId,
         userNumber,
-        domain: verifiedDomain
+        domain: verifiedDomain,
+        accountEnabled: !initialAccess.disableAzureAccount
       });
 
       const createdUser = await createGraphUserWithRetry(graphClient, payload, requestId);
@@ -124,7 +185,9 @@ const provisionUsersForRequest = async (requestId) => {
       createdUsers.push({
         azureUserId: createdUser.id,
         username,
-        temporaryPassword
+        temporaryPassword,
+        status: initialAccess.status,
+        blockedUntil: initialAccess.blockedUntil
       });
     });
 

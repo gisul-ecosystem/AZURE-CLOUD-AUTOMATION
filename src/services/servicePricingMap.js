@@ -24,7 +24,12 @@ const SERVICE_PRICING_MAP = {
   search: 'Azure AI Search',
   'azure key vault': 'Key Vault',
   keyvault: 'Key Vault',
-  'azure keyvault': 'Key Vault'
+  'azure keyvault': 'Key Vault',
+  'azure ai document intelligence': 'Foundry Tools',
+  'document intelligence': 'Foundry Tools',
+  'azure ai vision': 'Foundry Tools',
+  'azure ai language': 'Foundry Tools',
+  'azure ai speech': 'Foundry Tools'
 };
 
 const normalizeServiceKey = (value) => {

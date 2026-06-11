@@ -2,11 +2,12 @@
 
 import { useEffect, useState } from 'react';
 import { getUsageStatus } from '../services/api';
+import { DAY_LABELS } from '../utils/usageSchedule';
 
 const formatMinutes = (minutes) => {
   const hours = Math.floor(minutes / 60);
   const mins = minutes % 60;
-  
+
   if (hours > 0 && mins > 0) {
     return `${hours}h ${mins}m`;
   }
@@ -14,6 +15,13 @@ const formatMinutes = (minutes) => {
     return `${hours}h`;
   }
   return `${mins}m`;
+};
+
+const formatTime = (value) => {
+  if (!value) {
+    return '';
+  }
+  return new Date(value).toLocaleString();
 };
 
 export default function UsageStatus({ requestId, userId }) {
@@ -42,10 +50,7 @@ export default function UsageStatus({ requestId, userId }) {
     };
 
     fetchStatus();
-
-    // Refresh every 30 seconds
     const interval = setInterval(fetchStatus, 30000);
-
     return () => clearInterval(interval);
   }, [requestId, userId]);
 
@@ -68,28 +73,38 @@ export default function UsageStatus({ requestId, userId }) {
   }
 
   if (!status || !status.enableDailyUsage) {
-    return null; // Don't show if daily usage is not enabled
+    return null;
   }
 
-  const percentUsed = status.dailyLimitMinutes > 0 
-    ? Math.min(100, (status.usedMinutes / status.dailyLimitMinutes) * 100)
-    : 0;
+  const schedule = status.scheduleSummary;
+  const percentUsed =
+    status.dailyLimitMinutes > 0
+      ? Math.min(100, (status.usedMinutes / status.dailyLimitMinutes) * 100)
+      : 0;
 
   return (
     <div className="surface" style={{ padding: 16 }}>
       <div className="panel__heading" style={{ marginBottom: 14 }}>
         <div>
-          <h3>Daily Usage Status</h3>
-          <p>Your usage for today</p>
+          <h3>Usage Status</h3>
+          <p>
+            {schedule?.dayLabel || 'Today'}
+            {schedule?.activeSlot ? ` | Window ${schedule.activeSlot.start} - ${schedule.activeSlot.end}` : ''}
+          </p>
         </div>
         {status.blocked && (
           <span className="helper-badge" style={{ backgroundColor: 'var(--color-error, #dc2626)', color: '#fff' }}>
             Blocked
           </span>
         )}
-        {status.hasActiveSession && !status.blocked && (
+        {status.hasActiveSession && !status.blocked && status.withinWindow && (
           <span className="helper-badge" style={{ backgroundColor: 'var(--color-success, #16a34a)', color: '#fff' }}>
             Active Session
+          </span>
+        )}
+        {!status.withinWindow && !status.blocked && (
+          <span className="helper-badge" style={{ backgroundColor: 'var(--color-warning, #f59e0b)', color: '#111' }}>
+            Outside Window
           </span>
         )}
       </div>
@@ -98,7 +113,7 @@ export default function UsageStatus({ requestId, userId }) {
         <div className="form-grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))' }}>
           <div>
             <p className="field__label" style={{ fontSize: '0.875rem', marginBottom: 4 }}>
-              Daily Limit
+              Today&apos;s Limit
             </p>
             <p style={{ fontSize: '1.25rem', fontWeight: '600', margin: 0 }}>
               {formatMinutes(status.dailyLimitMinutes)}
@@ -118,10 +133,10 @@ export default function UsageStatus({ requestId, userId }) {
             <p className="field__label" style={{ fontSize: '0.875rem', marginBottom: 4 }}>
               Remaining
             </p>
-            <p 
-              style={{ 
-                fontSize: '1.25rem', 
-                fontWeight: '600', 
+            <p
+              style={{
+                fontSize: '1.25rem',
+                fontWeight: '600',
                 margin: 0,
                 color: status.remainingMinutes <= 0 ? 'var(--color-error, #dc2626)' : 'inherit'
               }}
@@ -131,62 +146,88 @@ export default function UsageStatus({ requestId, userId }) {
           </div>
         </div>
 
-        {/* Progress bar */}
+        {schedule?.slots?.length > 0 ? (
+          <div>
+            <p className="field__label" style={{ fontSize: '0.875rem', marginBottom: 6 }}>
+              {DAY_LABELS[schedule.day] || schedule.dayLabel} Schedule
+            </p>
+            <p className="inline-note" style={{ margin: 0 }}>
+              {(schedule.slots || []).map((slot) => `${slot.start} - ${slot.end}`).join(', ')}
+              {schedule.timezone ? ` (${schedule.timezone})` : ''}
+            </p>
+          </div>
+        ) : null}
+
         <div>
-          <div 
-            style={{ 
-              width: '100%', 
-              height: 8, 
-              backgroundColor: 'var(--color-surface-secondary, #f3f4f6)', 
+          <div
+            style={{
+              width: '100%',
+              height: 8,
+              backgroundColor: 'var(--color-surface-secondary, #f3f4f6)',
               borderRadius: 4,
               overflow: 'hidden'
             }}
           >
-            <div 
-              style={{ 
-                width: `${percentUsed}%`, 
-                height: '100%', 
-                backgroundColor: percentUsed >= 100 
-                  ? 'var(--color-error, #dc2626)' 
-                  : percentUsed >= 80 
-                    ? 'var(--color-warning, #f59e0b)' 
-                    : 'var(--color-success, #16a34a)',
+            <div
+              style={{
+                width: `${percentUsed}%`,
+                height: '100%',
+                backgroundColor:
+                  percentUsed >= 100
+                    ? 'var(--color-error, #dc2626)'
+                    : percentUsed >= 80
+                      ? 'var(--color-warning, #f59e0b)'
+                      : 'var(--color-success, #16a34a)',
                 transition: 'width 0.3s ease'
               }}
             />
           </div>
           <p className="inline-note" style={{ marginTop: 4 }}>
-            {percentUsed.toFixed(0)}% of daily limit used
+            {percentUsed.toFixed(0)}% of today&apos;s limit used
           </p>
         </div>
 
         {status.blocked && (
-          <div 
-            className="error-box" 
-            style={{ 
-              padding: 12, 
-              backgroundColor: 'var(--color-error-bg, #fef2f2)', 
+          <div
+            className="error-box"
+            style={{
+              padding: 12,
+              backgroundColor: 'var(--color-error-bg, #fef2f2)',
               border: '1px solid var(--color-error, #dc2626)',
               borderRadius: 4
             }}
           >
             <p style={{ margin: 0, fontSize: '0.875rem' }}>
-              <strong>Access Blocked:</strong> You have exceeded your daily usage limit. 
-              Access will be restored at midnight.
+              <strong>Access Blocked:</strong> {status.accessMessage || 'Usage limits are currently blocking access.'}
             </p>
             {status.blockedUntil && (
               <p style={{ margin: '4px 0 0 0', fontSize: '0.875rem' }}>
-                Blocked until: {new Date(status.blockedUntil).toLocaleString()}
+                Blocked until: {formatTime(status.blockedUntil)}
               </p>
             )}
           </div>
         )}
 
+        {!status.blocked && !status.withinWindow && schedule?.nextWindow?.at && (
+          <div
+            style={{
+              padding: 12,
+              backgroundColor: 'var(--color-warning-bg, #fffbeb)',
+              border: '1px solid var(--color-warning, #f59e0b)',
+              borderRadius: 4
+            }}
+          >
+            <p style={{ margin: 0, fontSize: '0.875rem' }}>
+              <strong>Outside scheduled hours.</strong> Next window opens at {formatTime(schedule.nextWindow.at)}.
+            </p>
+          </div>
+        )}
+
         {!status.blocked && status.remainingMinutes <= 30 && status.remainingMinutes > 0 && (
-          <div 
-            style={{ 
-              padding: 12, 
-              backgroundColor: 'var(--color-warning-bg, #fffbeb)', 
+          <div
+            style={{
+              padding: 12,
+              backgroundColor: 'var(--color-warning-bg, #fffbeb)',
               border: '1px solid var(--color-warning, #f59e0b)',
               borderRadius: 4
             }}
@@ -198,11 +239,11 @@ export default function UsageStatus({ requestId, userId }) {
         )}
 
         {status.expired && (
-          <div 
-            className="error-box" 
-            style={{ 
-              padding: 12, 
-              backgroundColor: 'var(--color-error-bg, #fef2f2)', 
+          <div
+            className="error-box"
+            style={{
+              padding: 12,
+              backgroundColor: 'var(--color-error-bg, #fef2f2)',
               border: '1px solid var(--color-error, #dc2626)',
               borderRadius: 4
             }}
@@ -212,7 +253,7 @@ export default function UsageStatus({ requestId, userId }) {
             </p>
             {status.expiryDate && (
               <p style={{ margin: '4px 0 0 0', fontSize: '0.875rem' }}>
-                Expired on: {new Date(status.expiryDate).toLocaleString()}
+                Expired on: {formatTime(status.expiryDate)}
               </p>
             )}
           </div>

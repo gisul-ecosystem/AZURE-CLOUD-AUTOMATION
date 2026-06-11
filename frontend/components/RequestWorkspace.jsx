@@ -4,8 +4,13 @@ import { useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import PricingSummary from './PricingSummary';
 import RequestForm from './RequestForm';
+import {
+  createDefaultSchedule,
+  validateUsageSchedule,
+  toApiUsageSchedule
+} from '../utils/usageSchedule';
 import RequestTimeline from './RequestTimeline';
-import { calculatePricingEstimate, createRequestWithPricing, getAvailableInstances } from '../services/api';
+import { calculatePricingEstimate, createAdminAccessRequest, createRequestWithPricing, getAvailableInstances } from '../services/api';
 import useAzurePricing from '../hooks/useAzurePricing';
 import useLocations from '../hooks/useLocations';
 import useServicePricing from '../hooks/useServicePricing';
@@ -70,7 +75,7 @@ export default function RequestWorkspace() {
     startDate: getTodayDateTime(),
     endDate: getDateTimePlusDays(30),
     enableDailyUsage: false,
-    dailyLimitHours: ''
+    usageSchedule: createDefaultSchedule()
   });
   const [pricing, setPricing] = useState({
     loading: false,
@@ -84,6 +89,7 @@ export default function RequestWorkspace() {
   const [submitError, setSubmitError] = useState('');
   const [submitDebug, setSubmitDebug] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [adminAccessRequestState, setAdminAccessRequestState] = useState({});
   const {
     services: pricedServices,
     categories,
@@ -162,7 +168,12 @@ export default function RequestWorkspace() {
 
         nextInstancesByServiceId[serviceId].push({
           id: Number(instance.id),
-          option_name: instance.option_name
+          option_name: instance.option_name,
+          guide: instance.guide,
+          dailyPrice: instance.dailyPrice ?? instance.daily_price ?? null,
+          currency: instance.currency || 'USD',
+          priceRegion: instance.priceRegion ?? instance.price_region ?? null,
+          priceIsEstimate: instance.priceIsEstimate ?? instance.price_is_estimate ?? false
         });
       });
 
@@ -199,7 +210,12 @@ export default function RequestWorkspace() {
 
           nextInstancesByServiceId[serviceId].push({
             id: Number(instance.id),
-            option_name: instance.option_name
+            option_name: instance.option_name,
+            guide: instance.guide,
+            dailyPrice: instance.dailyPrice ?? instance.daily_price ?? null,
+            currency: instance.currency || 'USD',
+            priceRegion: instance.priceRegion ?? instance.price_region ?? null,
+            priceIsEstimate: instance.priceIsEstimate ?? instance.price_is_estimate ?? false
           });
         });
 
@@ -255,7 +271,7 @@ export default function RequestWorkspace() {
       accounts: 0,
       services: 0
     });
-  }, [selectedServiceIds.join(',')]);
+  }, [selectedServiceIds.join(','), instanceSelections]);
 
   useEffect(() => {
     if (selectedServiceIds.length === 0 || locationsLoading || locations.length === 0) {
@@ -377,9 +393,7 @@ export default function RequestWorkspace() {
         ? lookupTierRole(backendServiceId, selectedInstance)
         : null;
       const tierAutomated = Boolean(tierAutomatedRole);
-      const enableRoleSelection = tierAutomated
-        ? false
-        : catalogService.enable_role_selection !== false;
+      const enableRoleSelection = false;
       const defaultRole = tierAutomated
         ? tierAutomatedRole
         : catalogService.default_role || null;
@@ -479,12 +493,20 @@ export default function RequestWorkspace() {
       let next = null;
 
       for (const entry of selectedServiceRoleEntries) {
-        if (!entry.tierAutomated || !entry.backendServiceId || !entry.tierAutomatedRole) {
+        if (!entry.backendServiceId) {
+          continue;
+        }
+
+        const autoRole = entry.tierAutomated
+          ? entry.tierAutomatedRole
+          : entry.defaultRole;
+
+        if (!autoRole) {
           continue;
         }
 
         const key = String(entry.backendServiceId);
-        const autoRoles = [entry.tierAutomatedRole];
+        const autoRoles = [autoRole];
         const currentRoles = Array.isArray(current[key]) ? current[key] : [];
 
         if (
@@ -502,6 +524,32 @@ export default function RequestWorkspace() {
       }
 
       return next || current;
+    });
+  }, [selectedServiceRoleEntries]);
+
+  useEffect(() => {
+    setAdminAccessRequestState((current) => {
+      const activeServiceIds = new Set(
+        selectedServiceRoleEntries
+          .map((entry) => String(entry.backendServiceId))
+          .filter(Boolean)
+      );
+      const next = {};
+      let changed = false;
+
+      for (const [serviceId, state] of Object.entries(current)) {
+        if (activeServiceIds.has(serviceId)) {
+          next[serviceId] = state;
+        } else {
+          changed = true;
+        }
+      }
+
+      if (!changed && Object.keys(current).length === Object.keys(next).length) {
+        return current;
+      }
+
+      return next;
     });
   }, [selectedServiceRoleEntries]);
 
@@ -547,31 +595,20 @@ export default function RequestWorkspace() {
             };
           }
 
-          // If role selection is disabled, auto-assign default role
-          if (!entry.enableRoleSelection && entry.defaultRole && entry.backendServiceId) {
-            console.log(`[ROLE_AUTO_ASSIGNED] Service ${entry.name}: ${entry.defaultRole}`);
+          if (entry.defaultRole && entry.backendServiceId) {
             return {
               serviceId: Number(entry.backendServiceId),
               roles: [entry.defaultRole]
             };
           }
-          
-          // If role selection is enabled, use manually selected roles
-          if (entry.enableRoleSelection && entry.backendServiceId && entry.selectedRoles.length > 0) {
-            return {
-              serviceId: Number(entry.backendServiceId),
-              roles: entry.selectedRoles
-            };
-          }
-          
-          // If role is not required and no roles selected, allow empty
+
           if (!entry.roleRequired && entry.backendServiceId) {
             return {
               serviceId: Number(entry.backendServiceId),
               roles: []
             };
           }
-          
+
           return null;
         })
         .filter(Boolean),
@@ -587,7 +624,8 @@ export default function RequestWorkspace() {
     if (name === 'enableDailyUsage') {
       setForm((current) => ({
         ...current,
-        [name]: value
+        [name]: value,
+        usageSchedule: value ? current.usageSchedule || createDefaultSchedule() : current.usageSchedule
       }));
       return;
     }
@@ -716,13 +754,12 @@ export default function RequestWorkspace() {
     }
 
     if (selectedRolesPayload.length === 0) {
-      // Check if any service requires roles
       const requiresRoles = selectedServiceRoleEntries.some(
-        (entry) => entry.backendServiceId && entry.roleRequired && entry.enableRoleSelection
+        (entry) => entry.backendServiceId && entry.roleRequired && entry.defaultRole
       );
-      
+
       if (requiresRoles) {
-        setSubmitError('Select at least one role for services that require role selection.');
+        setSubmitError('Basic permissions could not be resolved for one or more selected services.');
         return;
       }
     }
@@ -762,15 +799,20 @@ export default function RequestWorkspace() {
 
       // Add daily usage fields if enabled
       if (form.enableDailyUsage) {
-        const dailyLimitHours = Number.parseFloat(form.dailyLimitHours);
-        if (!dailyLimitHours || dailyLimitHours <= 0) {
-          setSubmitError('Daily usage limit must be a positive number.');
+        const scheduleErrors = validateUsageSchedule(form.usageSchedule);
+        if (scheduleErrors.length > 0) {
+          setSubmitError(scheduleErrors[0]);
           setSubmitting(false);
           return;
         }
 
+        const apiSchedule = toApiUsageSchedule(form.usageSchedule);
         requestPayload.enableDailyUsage = true;
-        requestPayload.dailyLimitMinutes = Math.round(dailyLimitHours * 60);
+        requestPayload.usageSchedule = apiSchedule;
+        requestPayload.dailyLimitMinutes = Object.values(apiSchedule.days).reduce(
+          (max, day) => Math.max(max, day.enabled ? day.limitMinutes : 0),
+          0
+        );
       }
 
       const result = await createRequestWithPricing(requestPayload);
@@ -788,6 +830,92 @@ export default function RequestWorkspace() {
       }
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  const handleAdminAccessRequest = async (serviceId, action) => {
+    const key = String(serviceId);
+
+    if (action?.type === 'draft') {
+      setAdminAccessRequestState((current) => ({
+        ...current,
+        [key]: {
+          ...(current[key] || {}),
+          draft: action.value,
+          error: '',
+          success: ''
+        }
+      }));
+      return;
+    }
+
+    if (action?.type !== 'submit') {
+      return;
+    }
+
+    const draft = String(adminAccessRequestState[key]?.draft || '').trim();
+
+    if (!form.customerEmail.trim()) {
+      setAdminAccessRequestState((current) => ({
+        ...current,
+        [key]: {
+          ...(current[key] || {}),
+          error: 'Enter the customer email before requesting admin access.'
+        }
+      }));
+      return;
+    }
+
+    if (!draft) {
+      setAdminAccessRequestState((current) => ({
+        ...current,
+        [key]: {
+          ...(current[key] || {}),
+          error: 'Describe the admin access you need.'
+        }
+      }));
+      return;
+    }
+
+    setAdminAccessRequestState((current) => ({
+      ...current,
+      [key]: {
+        ...(current[key] || {}),
+        submitting: true,
+        error: '',
+        success: ''
+      }
+    }));
+
+    try {
+      await createAdminAccessRequest({
+        customerEmail: form.customerEmail.trim(),
+        serviceId: Number(serviceId),
+        serviceName: action.serviceName,
+        defaultRole: action.defaultRole,
+        requestedAccess: draft,
+        accountCount: parsedAccountCount || undefined
+      });
+
+      setAdminAccessRequestState((current) => ({
+        ...current,
+        [key]: {
+          draft: current[key]?.draft || draft,
+          submitting: false,
+          submitted: true,
+          error: '',
+          success: 'Admin access request submitted. It will appear in the organization admin portal for review.'
+        }
+      }));
+    } catch (error) {
+      setAdminAccessRequestState((current) => ({
+        ...current,
+        [key]: {
+          ...(current[key] || {}),
+          submitting: false,
+          error: error.message || 'Unable to submit admin access request.'
+        }
+      }));
     }
   };
 
@@ -843,7 +971,17 @@ export default function RequestWorkspace() {
               };
             });
           }}
+          onRequestAdminAccess={handleAdminAccessRequest}
+          adminAccessRequestState={adminAccessRequestState}
           onFieldChange={updateField}
+          onUsageScheduleChange={(usageSchedule) => {
+            setSubmitError('');
+            setSubmitDebug('');
+            setForm((current) => ({
+              ...current,
+              usageSchedule
+            }));
+          }}
           onSelectionChange={setSelectedServices}
           onSubmit={handleSubmit}
           submitting={submitting}

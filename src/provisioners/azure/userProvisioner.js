@@ -126,7 +126,7 @@ const getRowField = (row, ...keys) => {
   return '';
 };
 
-const buildUserPayload = ({ requestId, userNumber, domain }) => {
+const buildUserPayload = ({ requestId, userNumber, domain, accountEnabled = true }) => {
   const username = `cust-${requestId}-user-${userNumber}`;
   const temporaryPassword = generateTemporaryPassword();
 
@@ -134,7 +134,7 @@ const buildUserPayload = ({ requestId, userNumber, domain }) => {
     username,
     temporaryPassword,
     payload: {
-      accountEnabled: true,
+      accountEnabled: accountEnabled !== false,
       displayName: `Customer ${requestId} User ${userNumber}`,
       mailNickname: username,
       userPrincipalName: `${username}@${domain}`,
