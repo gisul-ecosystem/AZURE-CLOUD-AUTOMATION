@@ -835,10 +835,7 @@ const revokeAssignmentsForUser = async (authorizationClient, assignments, reques
   }
 };
 
-const deletePortalUser = async (sessionToken, requestId, userId) => {
-  const session = await requireSession(sessionToken);
-  validateSessionForRequest(session, requestId);
-
+const deletePortalUserCore = async ({ requestId, userId, auditActor = 'customer', auditEmail = null }) => {
   const targetUserId = String(userId || '').trim();
   if (!targetUserId) {
     throw new AppError('User id is required.', 400);
@@ -847,6 +844,7 @@ const deletePortalUser = async (sessionToken, requestId, userId) => {
   const client = await db.connect();
   let deletedUser = null;
   let transactionSuccess = false;
+  let customerEmail = auditEmail;
 
   try {
     await client.query('BEGIN');
@@ -858,6 +856,7 @@ const deletePortalUser = async (sessionToken, requestId, userId) => {
       throw new AppError('User not found.', 404);
     }
 
+    customerEmail = customerEmail || request.customer_email;
     const assignments = await getPortalAssignmentsForUser(client, requestId, targetUserId);
     const { authorizationClient } = createAuthorizationClient();
 
@@ -896,7 +895,6 @@ const deletePortalUser = async (sessionToken, requestId, userId) => {
       [requestId, targetUserId]
     );
 
-    // Record cleanup log (never throws)
     await recordCleanupLog(client, {
       requestId,
       eventName: 'manage_user_deleted',
@@ -905,7 +903,8 @@ const deletePortalUser = async (sessionToken, requestId, userId) => {
       details: {
         userId: targetUserId,
         azureUserId: user.azure_user_id,
-        assignmentsRemoved: assignments.length
+        assignmentsRemoved: assignments.length,
+        actor: auditActor
       }
     });
 
@@ -921,7 +920,8 @@ const deletePortalUser = async (sessionToken, requestId, userId) => {
     logManagePortalEvent('info', 'user_delete_completed', {
       requestId,
       userId: targetUserId,
-      azureUserId: user.azure_user_id
+      azureUserId: user.azure_user_id,
+      actor: auditActor
     });
   } catch (error) {
     await client.query('ROLLBACK');
@@ -930,15 +930,14 @@ const deletePortalUser = async (sessionToken, requestId, userId) => {
     client.release();
   }
 
-  // Record audit log AFTER transaction completes (using separate connection if needed)
   if (transactionSuccess && deletedUser) {
     try {
       const auditClient = await db.connect();
       try {
         await recordAuditLog(auditClient, {
           requestId,
-          customerEmail: session.customer_email,
-          actor: 'customer',
+          customerEmail,
+          actor: auditActor,
           action: 'manage_user_deleted',
           targetUserId,
           details: {
@@ -950,7 +949,6 @@ const deletePortalUser = async (sessionToken, requestId, userId) => {
         auditClient.release();
       }
     } catch (auditError) {
-      // Log but don't fail the operation
       logManagePortalEvent('error', 'audit_log_skipped', {
         requestId,
         action: 'manage_user_deleted',
@@ -966,10 +964,13 @@ const deletePortalUser = async (sessionToken, requestId, userId) => {
   };
 };
 
-const updatePortalUserRoles = async (sessionToken, requestId, userId, roles) => {
-  const session = await requireSession(sessionToken);
-  validateSessionForRequest(session, requestId);
-
+const updatePortalUserRolesCore = async ({
+  requestId,
+  userId,
+  roles,
+  auditActor = 'customer',
+  auditEmail = null
+}) => {
   const targetUserId = String(userId || '').trim();
   const normalizedRoles = normalizeRoles(roles);
 
@@ -985,6 +986,7 @@ const updatePortalUserRoles = async (sessionToken, requestId, userId, roles) => 
   let transactionSuccess = false;
   let assignedRoles = [];
   let azureUserId = null;
+  let customerEmail = auditEmail;
 
   try {
     await client.query('BEGIN');
@@ -996,6 +998,7 @@ const updatePortalUserRoles = async (sessionToken, requestId, userId, roles) => 
       throw new AppError('User not found.', 404);
     }
 
+    customerEmail = customerEmail || request.customer_email;
     azureUserId = user.azure_user_id;
 
     const scope = await getRequestPrimaryScope(client, requestId);
@@ -1052,13 +1055,7 @@ const updatePortalUserRoles = async (sessionToken, requestId, userId, roles) => 
           )
           VALUES ($1, $2, $3, $4, $5, NOW())
         `,
-        [
-          assignmentId,
-          requestId,
-          targetUserId,
-          roleName,
-          scope
-        ]
+        [assignmentId, requestId, targetUserId, roleName, scope]
       );
 
       assignedRoles.push({
@@ -1073,7 +1070,8 @@ const updatePortalUserRoles = async (sessionToken, requestId, userId, roles) => 
     logManagePortalEvent('info', 'manage_user_roles_updated', {
       requestId,
       userId: targetUserId,
-      roles: assignedRoles.length
+      roles: assignedRoles.length,
+      actor: auditActor
     });
   } catch (error) {
     await client.query('ROLLBACK');
@@ -1082,15 +1080,14 @@ const updatePortalUserRoles = async (sessionToken, requestId, userId, roles) => 
     client.release();
   }
 
-  // Record audit log AFTER transaction completes (using separate connection)
   if (transactionSuccess) {
     try {
       const auditClient = await db.connect();
       try {
         await recordAuditLog(auditClient, {
           requestId,
-          customerEmail: session.customer_email,
-          actor: 'customer',
+          customerEmail,
+          actor: auditActor,
           action: 'manage_user_roles_updated',
           targetUserId,
           details: {
@@ -1101,7 +1098,6 @@ const updatePortalUserRoles = async (sessionToken, requestId, userId, roles) => 
         auditClient.release();
       }
     } catch (auditError) {
-      // Log but don't fail the operation
       logManagePortalEvent('error', 'audit_log_skipped', {
         requestId,
         action: 'manage_user_roles_updated',
@@ -1117,11 +1113,55 @@ const updatePortalUserRoles = async (sessionToken, requestId, userId, roles) => 
   };
 };
 
+const deletePortalUser = async (sessionToken, requestId, userId) => {
+  const session = await requireSession(sessionToken);
+  validateSessionForRequest(session, requestId);
+
+  return deletePortalUserCore({
+    requestId,
+    userId,
+    auditActor: 'customer',
+    auditEmail: session.customer_email
+  });
+};
+
+const updatePortalUserRoles = async (sessionToken, requestId, userId, roles) => {
+  const session = await requireSession(sessionToken);
+  validateSessionForRequest(session, requestId);
+
+  return updatePortalUserRolesCore({
+    requestId,
+    userId,
+    roles,
+    auditActor: 'customer',
+    auditEmail: session.customer_email
+  });
+};
+
+const deletePortalUserByOrgAdmin = async ({ adminEmail, requestId, userId }) =>
+  deletePortalUserCore({
+    requestId,
+    userId,
+    auditActor: 'org_admin',
+    auditEmail: adminEmail
+  });
+
+const updatePortalUserRolesByOrgAdmin = async ({ adminEmail, requestId, userId, roles }) =>
+  updatePortalUserRolesCore({
+    requestId,
+    userId,
+    roles,
+    auditActor: 'org_admin',
+    auditEmail: adminEmail
+  });
+
 module.exports = {
   deletePortalUser,
+  deletePortalUserByOrgAdmin,
   exchangeAccessToken,
   issueAccessPortalTokenForRequest,
   listPortalUsers,
   requireSession,
-  updatePortalUserRoles
+  updatePortalUserRoles,
+  updatePortalUserRolesByOrgAdmin
 };

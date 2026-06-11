@@ -3,6 +3,7 @@ const db = require('../db/postgres');
 const pricingService = require('./pricingService');
 const { assertProvisionableLocation } = require('./azureLocationService');
 const { applyTierRolesToAssignments } = require('./instanceRoleMappingService');
+const adminAccessRequestService = require('./adminAccessRequestService');
 
 async function createRequest({
   customerEmail,
@@ -14,7 +15,8 @@ async function createRequest({
   startDate,
   endDate,
   enableDailyUsage,
-  dailyLimitMinutes
+  dailyLimitMinutes,
+  usageSchedule
 }) {
 
   const client = await db.connect();
@@ -238,7 +240,9 @@ async function createRequest({
 
           enable_daily_usage,
 
-          daily_limit_minutes
+          daily_limit_minutes,
+
+          usage_schedule
 
         )
 
@@ -251,7 +255,8 @@ async function createRequest({
           $5,
           $6,
           $7,
-          $8
+          $8,
+          $9
 
         )
 
@@ -275,7 +280,9 @@ async function createRequest({
 
           enableDailyUsage === true,
 
-          enableDailyUsage === true && dailyLimitMinutes ? Number(dailyLimitMinutes) : null
+          enableDailyUsage === true && dailyLimitMinutes ? Number(dailyLimitMinutes) : null,
+
+          enableDailyUsage === true && usageSchedule ? JSON.stringify(usageSchedule) : null
 
         ]
       );
@@ -461,9 +468,33 @@ async function createRequest({
 
 
 
+    await adminAccessRequestService.linkAdminAccessRequestsToRequest({
+      customerEmail,
+      requestId,
+      client
+    });
+
     await client.query(
       'COMMIT'
     );
+
+    try {
+      await adminAccessRequestService.fulfillLinkedApprovedAccessRequests({
+        customerEmail,
+        requestId
+      });
+    } catch (fulfillmentError) {
+      console.error(
+        JSON.stringify({
+          timestamp: new Date().toISOString(),
+          service: 'request-service',
+          level: 'error',
+          event: 'approved_access_fulfillment_failed',
+          requestId,
+          message: fulfillmentError?.message
+        })
+      );
+    }
 
 
 

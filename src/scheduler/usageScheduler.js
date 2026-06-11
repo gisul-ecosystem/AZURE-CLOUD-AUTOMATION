@@ -2,7 +2,13 @@ const cron = require('node-cron');
 const db = require('../db/postgres');
 const usageService = require('../services/usageService');
 const { monitorAzureSignIns } = require('../services/azureSignInMonitor');
-const { restoreAzureAccess } = require('../services/usageEnforcementService');
+const {
+  restoreAzureAccess,
+  enforceScheduleViolation,
+  enforceBlockedAzureUsers
+} = require('../services/usageEnforcementService');
+const { evaluateUsageAccess } = require('../services/usageAccessEvaluator');
+const { resetDailyCountersIfNeeded } = require('../services/usageMiddlewareHelper');
 
 /**
  * Monitor active sessions every minute
@@ -23,23 +29,35 @@ const monitorActiveSessions = async () => {
     console.log(`Monitoring ${sessions.length} active session(s)`);
 
     for (const session of sessions) {
-      const totalMinutes = session.usedTodayMinutes + session.currentSessionMinutes;
+      const access = session.access;
 
-      // Check if user has exceeded or will exceed limit
-      if (totalMinutes >= session.dailyLimitMinutes) {
+      if (!access?.allowed) {
         console.log(
-          `[LIMIT_REACHED] Session ${session.sessionId} for user ${session.userId} exceeded limit. ` +
-            `Total: ${totalMinutes} min, Limit: ${session.dailyLimitMinutes} min`
+          `[SESSION_VIOLATION] Session ${session.sessionId} for user ${session.userId}: ${access.reason}`
         );
 
-        // Force logout the user using the service function
         try {
-          await usageService.forceLogoutUser({
-            requestId: session.requestId,
-            userId: session.userId
-          });
+          if (access.reason === 'limit_exceeded') {
+            await usageService.forceLogoutUser({
+              requestId: session.requestId,
+              userId: session.userId
+            });
+          } else if (session.enforceInAzure) {
+            await enforceScheduleViolation({
+              requestId: session.requestId,
+              userId: session.userId,
+              reason: access.reason,
+              blockedUntil: access.blockedUntil,
+              message: access.message
+            });
+          } else {
+            await usageService.forceLogoutUser({
+              requestId: session.requestId,
+              userId: session.userId
+            });
+          }
         } catch (error) {
-          console.error(`[FORCE_LOGOUT] Error forcing logout for user ${session.userId}:`, error.message);
+          console.error(`[FORCE_LOGOUT] Error enforcing session ${session.sessionId}:`, error.message);
         }
       }
     }
@@ -57,101 +75,116 @@ const monitorActiveSessions = async () => {
  */
 const resetDailyUsageCounters = async () => {
   try {
-    console.log('[USAGE_RESET] Running daily usage counter reset...');
+    console.log('[USAGE_RESET] Running timezone-aware daily usage counter reset...');
 
-    // Get users that need to be restored in Azure
-    const blockedUsersResult = await db.query(
+    const usersResult = await db.query(
       `
-      SELECT 
+      SELECT
+        au.id,
+        au.request_id,
+        au.username,
+        au.used_today_minutes,
+        au.last_reset_date,
+        au.blocked_until,
+        r.enable_daily_usage,
+        r.daily_limit_minutes,
+        r.usage_schedule
+      FROM azure_users au
+      JOIN requests r ON r.id = au.request_id
+      WHERE r.enable_daily_usage = true
+        AND r.status NOT IN ('Cancelled', 'Expired')
+      `
+    );
+
+    let resetCount = 0;
+
+    for (const row of usersResult.rows) {
+      const beforeDate = row.last_reset_date
+        ? new Date(row.last_reset_date).toISOString().split('T')[0]
+        : null;
+      const refreshed = await resetDailyCountersIfNeeded(row, row, row.id, row.request_id);
+      const afterDate = refreshed.last_reset_date
+        ? new Date(refreshed.last_reset_date).toISOString().split('T')[0]
+        : null;
+
+      if (beforeDate !== afterDate) {
+        resetCount += 1;
+        console.log(
+          `[USAGE_RESET] Reset counters for user ${row.id} (${row.username || 'Unknown'}) on request ${row.request_id}`
+        );
+      }
+    }
+
+    await restoreScheduledAccess();
+    console.log(`[USAGE_RESET] Completed. Reset ${resetCount} user(s) based on request time zones.`);
+  } catch (error) {
+    console.error('[USAGE_RESET] Error resetting daily usage counters:', error);
+  }
+};
+
+const restoreScheduledAccess = async () => {
+  try {
+    const result = await db.query(
+      `
+      SELECT
         au.id,
         au.request_id,
         au.azure_user_id,
-        au.azure_username,
+        au.username,
+        au.used_today_minutes,
+        au.last_reset_date,
+        au.blocked_until,
+        r.enable_daily_usage,
+        r.daily_limit_minutes,
+        r.usage_schedule,
         r.enforce_in_azure
       FROM azure_users au
       JOIN requests r ON r.id = au.request_id
-      WHERE au.blocked_until IS NOT NULL
-        AND r.enable_daily_usage = true 
+      WHERE r.enable_daily_usage = true
         AND r.status NOT IN ('Cancelled', 'Expired')
-        AND r.enforce_in_azure = true
+        AND au.blocked_until IS NOT NULL
+        AND au.blocked_until <= NOW()
       `
     );
 
-    console.log(`[USAGE_RESET] Found ${blockedUsersResult.rowCount} blocked user(s) to restore in Azure.`);
+    for (const row of result.rows) {
+      const refreshedUser = await resetDailyCountersIfNeeded(row, row, row.id, row.request_id);
+      const access = evaluateUsageAccess({
+        request: row,
+        user: refreshedUser,
+        currentSessionMinutes: 0
+      });
 
-    // Restore Azure accounts first
-    for (const user of blockedUsersResult.rows) {
-      try {
-        await restoreAzureAccess({
-          azureUserId: user.azure_user_id,
-          userId: user.id,
-          requestId: user.request_id
-        });
-        console.log(`[ACCOUNT_RESTORED] Azure account re-enabled for user ${user.id} (${user.azure_username})`);
-      } catch (error) {
-        console.error(
-          `[USAGE_RESET] Error restoring Azure access for user ${user.id} (${user.azure_username}):`,
-          error.message
-        );
-      }
-    }
-
-    // Reset database counters
-    const result = await db.query(
-      `
-      UPDATE azure_users
-      SET 
-        used_today_minutes = 0,
-        blocked_until = NULL,
-        last_reset_date = CURRENT_DATE,
-        status = 'Active'
-      WHERE 
-        request_id IN (
-          SELECT id 
-          FROM requests 
-          WHERE enable_daily_usage = true 
-            AND status NOT IN ('Cancelled', 'Expired')
-        )
-      RETURNING id, request_id, azure_username
-      `
-    );
-
-    console.log(`[USAGE_RESET] Reset usage counters for ${result.rowCount} user(s).`);
-
-    if (result.rowCount > 0) {
-      // Log the reset action for each user
-      for (const row of result.rows) {
-        console.log(
-          `[ACCESS_RESTORED] User ${row.id} (${row.azure_username || 'Unknown'}) - Request ${row.request_id} access restored after daily reset`
-        );
+      if (!access.allowed) {
+        continue;
       }
 
-      // Log the reset action in enforcement logs
+      if (row.enforce_in_azure) {
+        try {
+          await restoreAzureAccess({
+            azureUserId: row.azure_user_id,
+            userId: row.id,
+            requestId: row.request_id
+          });
+        } catch (error) {
+          console.error(`[ACCESS_RESTORED] Failed for user ${row.id}:`, error.message);
+          continue;
+        }
+      }
+
       await db.query(
         `
-        INSERT INTO usage_enforcement_logs (
-          request_id,
-          user_id,
-          action,
-          details,
-          created_at
-        )
-        SELECT 
-          request_id,
-          id,
-          'daily_reset',
-          '{"message": "Daily usage counters reset", "action": "access_restored", "azure_account_enabled": "true"}',
-          NOW()
-        FROM azure_users
-        WHERE id = ANY($1)
+        UPDATE azure_users
+        SET blocked_until = NULL, status = 'Active'
+        WHERE id = $1 AND request_id = $2
         `,
-        [result.rows.map((row) => row.id)]
+        [row.id, row.request_id]
       );
-    }
 
-    console.log('[USAGE_RESET] Daily usage counter reset completed.');
+      console.log(`[ACCESS_RESTORED] User ${row.id} (${row.username}) restored for scheduled window.`);
+    }
   } catch (error) {
-    console.error('[USAGE_RESET] Error resetting daily usage counters:', error);
+    console.error('Error restoring scheduled access:', error);
   }
 };
 
@@ -166,8 +199,8 @@ const startUsageScheduler = () => {
     try {
       // First, detect new Azure Portal logins and create sessions
       await monitorAzureSignIns();
-
-      // Then, monitor existing active sessions for usage limits
+      await enforceBlockedAzureUsers();
+      await restoreScheduledAccess();
       await monitorActiveSessions();
     } catch (error) {
       console.error('Error in active session monitor job:', error);

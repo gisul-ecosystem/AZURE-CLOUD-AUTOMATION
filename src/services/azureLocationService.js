@@ -1,6 +1,9 @@
 const axios = require('axios');
 const { createAzureCredential, validateAzureEnv } = require('../config/azure');
-const { getRegionalDailyPricesForServices } = require('./estimatePricingService');
+const {
+  getRegionalDailyPricesForServices,
+  getPortalDailyFees
+} = require('./estimatePricingService');
 const AppError = require('../utils/AppError');
 
 const CACHE_TTL_MS = 5 * 60 * 1000;
@@ -19,7 +22,12 @@ const isProvisionableLocation = (location) => {
     return false;
   }
 
-  if (/stage/i.test(armRegionName) || /\(stage\)/i.test(displayLocation)) {
+  // Staging, preview, and EUAP regions appear in subscription listings but cannot host resource groups.
+  if (
+    /stage|euap|preview/i.test(armRegionName) ||
+    /stg$/i.test(armRegionName) ||
+    /\(stage\)|\(stg\)|\(preview\)/i.test(displayLocation)
+  ) {
     return false;
   }
 
@@ -98,24 +106,121 @@ const getSubscriptionLocations = async () => {
   return locations;
 };
 
+const resolveInstanceOptionForLocation = (
+  serviceId,
+  instancesByServiceId,
+  selectedInstancesByServiceId
+) => {
+  const selected =
+    selectedInstancesByServiceId?.[serviceId] ?? selectedInstancesByServiceId?.[String(serviceId)];
+
+  if (selected) {
+    return String(selected).trim();
+  }
+
+  const options = instancesByServiceId.get(Number(serviceId)) || [];
+
+  if (options.length === 0) {
+    return '';
+  }
+
+  const paidOption = options.find((option) => !/free/i.test(String(option?.option_name || '')));
+  return (paidOption || options[0])?.option_name || '';
+};
+
+const filterLocationsForSelectedInstances = async (
+  locations,
+  services,
+  instancesByServiceId,
+  selectedInstancesByServiceId
+) => {
+  const { filterInstancesForLocation, serviceSupportsInstances } = require('./instanceAvailabilityService');
+
+  const servicesById = new Map(
+    services.map((service) => [
+      Number(service.id),
+      {
+        id: Number(service.id),
+        name: service.name,
+        price_per_user: Number(service.price_per_user || 0)
+      }
+    ])
+  );
+
+  const instancesToValidate = services
+    .filter((service) => serviceSupportsInstances(service.name))
+    .map((service) => {
+      const serviceId = Number(service.id);
+      const optionName = resolveInstanceOptionForLocation(
+        serviceId,
+        instancesByServiceId,
+        selectedInstancesByServiceId
+      );
+
+      if (!optionName) {
+        return null;
+      }
+
+      return {
+        serviceId,
+        service_id: serviceId,
+        option_name: optionName
+      };
+    })
+    .filter(Boolean);
+
+  if (instancesToValidate.length === 0) {
+    return locations;
+  }
+
+  const availabilityChecks = await Promise.all(
+    locations.map(async (location) => {
+      const filtered = await filterInstancesForLocation(
+        location.arm_region_name,
+        instancesToValidate,
+        servicesById
+      );
+
+      return filtered.length === instancesToValidate.length ? location : null;
+    })
+  );
+
+  return availabilityChecks.filter(Boolean);
+};
+
 const getLocationsForSelectedServices = async (
   services = [],
   instancesByServiceId = new Map(),
   selectedInstancesByServiceId = {}
 ) => {
   const subscriptionLocations = await getSubscriptionLocations();
-  const regionalDailyPrices = await getRegionalDailyPricesForServices(
+  const eligibleLocations = await filterLocationsForSelectedInstances(
+    subscriptionLocations,
     services,
     instancesByServiceId,
     selectedInstancesByServiceId
   );
+  const [regionalDailyPrices, portalDailyFee] = await Promise.all([
+    getRegionalDailyPricesForServices(
+      services,
+      instancesByServiceId,
+      selectedInstancesByServiceId
+    ),
+    Promise.resolve(getPortalDailyFees(services))
+  ]);
 
-  return subscriptionLocations
-    .map((location) => ({
-      ...location,
-      base_price: Number((regionalDailyPrices.get(location.arm_region_name) || 0).toFixed(4)),
-      currency: 'USD'
-    }))
+  return eligibleLocations
+    .map((location) => {
+      const infraPrice = Number(regionalDailyPrices.get(location.arm_region_name) || 0);
+      const basePrice = infraPrice + portalDailyFee;
+
+      return {
+        ...location,
+        base_price: basePrice,
+        basePrice,
+        currency: 'USD'
+      };
+    })
     .sort((left, right) => {
       if (left.base_price !== right.base_price) {
         return left.base_price - right.base_price;

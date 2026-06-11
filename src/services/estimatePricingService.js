@@ -21,6 +21,38 @@ const ROLE_PRICE_MARKUP = 0;
 
 const escapeODataString = (value) => String(value || '').replace(/'/g, "''");
 
+const mapFoundrySku = (instanceOption, paidSku) =>
+  /free/i.test(String(instanceOption || '')) ? 'Free' : paidSku;
+
+const FOUNDRY_RETAIL_PROFILES = [
+  {
+    pattern: /document intelligence/i,
+    productContains: 'Document Intelligence',
+    mapSku: (instanceOption) => mapFoundrySku(instanceOption, 'S0')
+  },
+  {
+    pattern: /ai vision/i,
+    productContains: 'Vision',
+    mapSku: (instanceOption) => mapFoundrySku(instanceOption, 'Standard')
+  },
+  {
+    pattern: /ai language/i,
+    productContains: 'Language',
+    mapSku: (instanceOption) => mapFoundrySku(instanceOption, 'S0')
+  },
+  {
+    pattern: /ai speech/i,
+    productContains: 'Speech',
+    mapSku: (instanceOption) => mapFoundrySku(instanceOption, 'S1')
+  }
+];
+
+const buildFoundryToolsFilter = (productContains, skuName) =>
+  `serviceName eq 'Foundry Tools' ` +
+  `and contains(productName,'${escapeODataString(productContains)}') ` +
+  `and skuName eq '${escapeODataString(skuName)}' ` +
+  `and priceType eq 'Consumption'`;
+
 const resolveInstanceOption = (serviceId, instancesByServiceId, selectedInstancesByServiceId) => {
   const selected = selectedInstancesByServiceId?.[serviceId] ?? selectedInstancesByServiceId?.[String(serviceId)];
   if (selected) {
@@ -28,14 +60,25 @@ const resolveInstanceOption = (serviceId, instancesByServiceId, selectedInstance
   }
 
   const options = instancesByServiceId.get(Number(serviceId)) || [];
-  return options[0]?.option_name || '';
+  if (options.length === 0) {
+    return '';
+  }
+
+  const paidOption = options.find((option) => !/free/i.test(String(option?.option_name || '')));
+  return (paidOption || options[0])?.option_name || '';
 };
 
 const buildRetailFilter = (service, instanceOption) => {
-  const azureServiceName = getAzureServiceName(service.name || service.azure_role || service.category);
+  const serviceName = String(service.name || service.azure_role || service.category || '');
+  const azureServiceName = getAzureServiceName(serviceName);
 
   if (!azureServiceName) {
     return null;
+  }
+
+  const foundryProfile = FOUNDRY_RETAIL_PROFILES.find((profile) => profile.pattern.test(serviceName));
+  if (foundryProfile) {
+    return buildFoundryToolsFilter(foundryProfile.productContains, foundryProfile.mapSku(instanceOption));
   }
 
   if (isVirtualMachineService(service.name)) {
@@ -46,8 +89,6 @@ const buildRetailFilter = (service, instanceOption) => {
       `and priceType eq 'Consumption'`
     );
   }
-
-  const serviceName = String(service.name || '');
 
   if (/app service|functions/i.test(serviceName)) {
     const skuToken = mapAppServiceSku(instanceOption);
@@ -247,19 +288,7 @@ const getRegionalDailyPricesForServices = async (
     })
   );
 
-  const infraByRegion = mergeRegionalPriceMaps(priceMaps);
-  const portalDailyFee = getPortalDailyFees(services);
-
-  if (portalDailyFee <= 0) {
-    return infraByRegion;
-  }
-
-  const withPortalFees = new Map();
-  for (const [region, infraPrice] of infraByRegion.entries()) {
-    withPortalFees.set(region, infraPrice + portalDailyFee);
-  }
-
-  return withPortalFees;
+  return mergeRegionalPriceMaps(priceMaps);
 };
 
 const getDailyPriceForLocation = async (
@@ -394,6 +423,8 @@ const calculateEstimate = async ({
 
 module.exports = {
   loadPricingContext,
+  getServiceRegionalDailyPrices,
   getRegionalDailyPricesForServices,
+  getPortalDailyFees,
   calculateEstimate
 };

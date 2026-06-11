@@ -1,14 +1,9 @@
 'use client';
 
 import ServiceSelector from './ServiceSelector';
-
-const formatMoney = (value) =>
-  new Intl.NumberFormat('en-US', {
-    style: 'currency',
-    currency: 'USD',
-    minimumFractionDigits: 0,
-    maximumFractionDigits: 2
-  }).format(Number(value || 0));
+import InstanceSelector from './InstanceSelector';
+import WeeklyUsageSchedule from './WeeklyUsageSchedule';
+import { formatPreciseCurrency } from '../utils/formatters';
 
 const getRegionRankLabel = (index) => {
   if (index === 0) {
@@ -32,7 +27,10 @@ export default function RequestForm({
   selectedServiceInstanceEntries = [],
   onSelectServiceInstance,
   onToggleServiceRole,
+  onRequestAdminAccess,
+  adminAccessRequestState = {},
   onFieldChange,
+  onUsageScheduleChange,
   onSelectionChange,
   onSubmit,
   submitting = false,
@@ -117,7 +115,7 @@ export default function RequestForm({
           <div className="panel__heading" style={{ marginBottom: 14 }}>
             <div>
               <h3>Daily Usage Limits</h3>
-              <p>Configure optional daily usage restrictions for provisioned access.</p>
+              <p>Set weekly access windows and per-day usage limits for provisioned Azure access.</p>
             </div>
           </div>
 
@@ -134,24 +132,13 @@ export default function RequestForm({
               </span>
             </label>
 
-            {form.enableDailyUsage && (
-              <label className="field">
-                <span className="field__label">Daily Usage Limit (hours)</span>
-                <input
-                  type="number"
-                  name="dailyLimitHours"
-                  min="0.5"
-                  step="0.5"
-                  value={form.dailyLimitHours || ''}
-                  onChange={onFieldChange}
-                  placeholder="2"
-                  required={form.enableDailyUsage}
-                />
-                <span className="inline-note">
-                  Users can access provisioned resources for this many hours per day during the service period.
-                </span>
-              </label>
-            )}
+            {form.enableDailyUsage && form.usageSchedule ? (
+              <WeeklyUsageSchedule
+                schedule={form.usageSchedule}
+                onChange={onUsageScheduleChange}
+                disabled={submitting}
+              />
+            ) : null}
           </div>
         </div>
 
@@ -221,32 +208,17 @@ export default function RequestForm({
                       </div>
                     </div>
 
-                    <label className="field">
-                      <span className="field__label">Instance option</span>
-                      <select
-                        value={entry.selectedInstance || ''}
-                        onChange={(event) =>
-                          onSelectServiceInstance?.(entry.backendServiceId, event.target.value)
-                        }
-                        required
-                        disabled={instancesLoading || entry.availableInstances.length === 0}
-                      >
-                        <option value="">
-                          {instancesLoading ? 'Loading...' : 'Select instance...'}
-                        </option>
-                        {entry.availableInstances.map((instance) => {
-                          const mappedRole = entry.resolveInstanceRole?.(instance.option_name);
-
-                          return (
-                            <option key={instance.id} value={instance.option_name}>
-                              {mappedRole
-                                ? `${instance.option_name} → ${mappedRole}`
-                                : instance.option_name}
-                            </option>
-                          );
-                        })}
-                      </select>
-                    </label>
+                    <InstanceSelector
+                      instances={entry.availableInstances}
+                      selectedInstance={entry.selectedInstance || ''}
+                      onSelect={(optionName) =>
+                        onSelectServiceInstance?.(entry.backendServiceId, optionName)
+                      }
+                      disabled={instancesLoading || entry.availableInstances.length === 0}
+                      loading={instancesLoading}
+                      location={form.location}
+                      resolveInstanceRole={entry.resolveInstanceRole}
+                    />
                   </div>
                 ))}
             </div>
@@ -257,83 +229,146 @@ export default function RequestForm({
           <div className="surface" style={{ padding: 16 }}>
             <div className="panel__heading" style={{ marginBottom: 14 }}>
               <div>
-                <h3>Roles</h3>
-                <p>Select Azure RBAC roles for each service or view auto-assigned default roles.</p>
+                <h3>Permissions</h3>
+                <p>Basic permissions are included automatically. Request admin access if you need elevated roles.</p>
               </div>
               <span className="helper-badge">
-                {selectedServiceRoleEntries.reduce((count, entry) => {
-                  if (!entry.enableRoleSelection && entry.defaultRole) {
-                    return count + 1; // Count auto-assigned
-                  }
-                  return count + entry.selectedRoles.length; // Count manual
-                }, 0)} assigned
+                {selectedServiceRoleEntries.filter((entry) => entry.defaultRole || entry.tierAutomatedRole).length} included
               </span>
             </div>
 
             <div className="step-stack">
-              {selectedServiceRoleEntries.map((entry) => (
-                <div key={entry.backendServiceId || entry.catalogServiceId} className="surface" style={{ padding: 16 }}>
-                  <div className="panel__heading" style={{ marginBottom: 12 }}>
-                    <div>
-                      <h4 style={{ marginBottom: 4 }}>{entry.name}</h4>
-                      <p>Selected service</p>
-                    </div>
-                    {entry.enableRoleSelection ? (
-                      <span className="helper-badge">
-                        {entry.selectedRoles.length > 0 ? `${entry.selectedRoles.length} selected` : 
-                         entry.roleRequired ? 'Required' : 'Optional'}
-                      </span>
-                    ) : (
+              {selectedServiceRoleEntries.map((entry) => {
+                const assignedRole = entry.tierAutomated
+                  ? entry.tierAutomatedRole
+                  : entry.defaultRole;
+                const elevatedRoles = entry.availableRoles.filter(
+                  (role) => role.azure_role !== assignedRole
+                );
+                const requestKey = String(entry.backendServiceId);
+                const requestState = adminAccessRequestState[requestKey] || {};
+
+                return (
+                  <div key={entry.backendServiceId || entry.catalogServiceId} className="surface" style={{ padding: 16 }}>
+                    <div className="panel__heading" style={{ marginBottom: 12 }}>
+                      <div>
+                        <h4 style={{ marginBottom: 4 }}>{entry.name}</h4>
+                        <p>Included permissions for this service</p>
+                      </div>
                       <span className="helper-badge">Auto-assigned</span>
+                    </div>
+
+                    {entry.loading ? (
+                      <p className="inline-note">Loading permission mappings...</p>
+                    ) : !entry.backendServiceId ? (
+                      <p className="inline-note">This selected service does not map to a provisionable backend service.</p>
+                    ) : (
+                      <>
+                        {assignedRole ? (
+                          <div className="permission-highlight">
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+                              <span style={{ fontSize: '1.2em' }}>✓</span>
+                              <strong>{assignedRole}</strong>
+                              <span className="helper-badge">Included</span>
+                            </div>
+                            <p className="inline-note" style={{ margin: 0 }}>
+                              {entry.tierAutomated
+                                ? `Automatically assigned from the selected instance tier${entry.selectedInstance ? ` (${entry.selectedInstance})` : ''}.`
+                                : 'This basic permission is automatically assigned to all users during provisioning.'}
+                            </p>
+                          </div>
+                        ) : (
+                          <p className="inline-note" style={{ marginBottom: 12 }}>
+                            No default permission configured for this service.
+                          </p>
+                        )}
+
+                        {entry.availableRoles.length > 0 ? (
+                          <div style={{ marginBottom: elevatedRoles.length > 0 ? 16 : 0 }}>
+                            <p className="field__label" style={{ marginBottom: 8 }}>
+                              Available permissions for this service
+                            </p>
+                            <div className="step-stack" style={{ gap: 8 }}>
+                              {entry.availableRoles.map((role) => {
+                                const isIncluded = role.azure_role === assignedRole;
+
+                                return (
+                                  <div
+                                    key={role.id}
+                                    className={`permission-row${isIncluded ? ' permission-row--included' : ''}`}
+                                  >
+                                    <span>{role.azure_role}</span>
+                                    <span className="helper-badge">
+                                      {isIncluded ? 'Included' : 'Admin — request required'}
+                                    </span>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        ) : null}
+
+                        {elevatedRoles.length > 0 ? (
+                          <div className="permission-request-panel">
+                            <p className="field__label" style={{ marginBottom: 8 }}>
+                              Need admin access?
+                            </p>
+                            <p className="inline-note" style={{ marginBottom: 10 }}>
+                              Describe the elevated permissions you need. Your request will be sent to the organization admin for review.
+                            </p>
+                            <label className="field">
+                              <span className="field__label">Requested access</span>
+                              <textarea
+                                rows={3}
+                                value={requestState.draft || ''}
+                                onChange={(event) =>
+                                  onRequestAdminAccess?.(entry.backendServiceId, {
+                                    type: 'draft',
+                                    value: event.target.value
+                                  })
+                                }
+                                placeholder={`e.g. ${elevatedRoles.map((role) => role.azure_role).slice(0, 2).join(', ')}`}
+                                disabled={requestState.submitting || requestState.submitted}
+                              />
+                            </label>
+                            {requestState.error ? (
+                              <div className="error-box" style={{ marginTop: 10 }}>
+                                {requestState.error}
+                              </div>
+                            ) : null}
+                            {requestState.success ? (
+                              <div className="success-box" style={{ marginTop: 10 }}>
+                                {requestState.success}
+                              </div>
+                            ) : null}
+                            <div className="button-row" style={{ marginTop: 12 }}>
+                              <button
+                                type="button"
+                                className="btn btn--secondary"
+                                disabled={requestState.submitting || requestState.submitted}
+                                onClick={() =>
+                                  onRequestAdminAccess?.(entry.backendServiceId, {
+                                    type: 'submit',
+                                    serviceName: entry.name,
+                                    defaultRole: assignedRole,
+                                    elevatedRoles: elevatedRoles.map((role) => role.azure_role)
+                                  })
+                                }
+                              >
+                                {requestState.submitting
+                                  ? 'Submitting...'
+                                  : requestState.submitted
+                                    ? 'Request Submitted'
+                                    : 'Request Admin Access'}
+                              </button>
+                            </div>
+                          </div>
+                        ) : null}
+                      </>
                     )}
                   </div>
-
-                  {entry.loading ? (
-                    <p className="inline-note">Loading role mappings...</p>
-                  ) : !entry.backendServiceId ? (
-                    <p className="inline-note">This selected service does not map to a provisionable backend service.</p>
-                    ) : !entry.enableRoleSelection ? (
-                    // Auto-assigned default or tier-driven role
-                    <div className="surface" style={{ padding: 12, backgroundColor: '#f0f9ff', border: '1px solid #0ea5e9' }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
-                        <span style={{ fontSize: '1.2em' }}>✓</span>
-                        <strong>{entry.defaultRole || 'Default role'}</strong>
-                      </div>
-                      <p className="inline-note" style={{ margin: 0 }}>
-                        {entry.tierAutomated
-                          ? `Role is automatically assigned from the selected instance tier${entry.selectedInstance ? ` (${entry.selectedInstance})` : ''}. Azure Policy enforces the matching capacity mode.`
-                          : 'This role will be automatically assigned during provisioning.'}
-                      </p>
-                    </div>
-                  ) : entry.availableRoles.length > 0 ? (
-                    // Manual role selection
-                    <div className="step-stack" style={{ gap: 10 }}>
-                      {entry.availableRoles.map((role) => {
-                        const checked = entry.selectedRoles.includes(role.azure_role);
-
-                        return (
-                          <label key={role.id} className="field" style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
-                            <input
-                              type="checkbox"
-                              checked={checked}
-                              onChange={() => onToggleServiceRole?.(entry.backendServiceId, role.azure_role)}
-                            />
-                            <span className="field__label" style={{ margin: 0 }}>
-                              {role.azure_role}
-                            </span>
-                          </label>
-                        );
-                      })}
-                    </div>
-                  ) : (
-                    <p className="inline-note">
-                      {entry.roleRequired 
-                        ? 'No role mappings configured for this service.' 
-                        : 'No role mappings configured. Roles are optional for this service.'}
-                    </p>
-                  )}
-                </div>
-              ))}
+                );
+              })}
             </div>
           </div>
         ) : null}
@@ -366,7 +401,7 @@ export default function RequestForm({
                     const label = region.display_location || region.label || region.arm_region_name || region.value;
                     return (
                       <option key={region.arm_region_name || region.value} value={region.arm_region_name || region.value}>
-                        {getRegionRankLabel(index)} {label} ({formatMoney(region.basePrice)}/day)
+                        {getRegionRankLabel(index)} {label} ({formatPreciseCurrency(region.basePrice, region.currency)}/day)
                       </option>
                     );
                   })

@@ -479,6 +479,15 @@ const createPolicyClient = () => {
 const getCustomPolicyDefinitionId = (subscriptionId, policyKey) =>
   `/subscriptions/${subscriptionId}/providers/Microsoft.Authorization/policyDefinitions/${policyKey}`;
 
+const buildPolicyDefinitionPayload = (definition) => ({
+  displayName: definition.displayName,
+  description: definition.description,
+  policyType: 'Custom',
+  mode: definition.mode,
+  parameters: definition.parameters,
+  policyRule: definition.policyRule
+});
+
 const ensureCustomPolicyDefinition = async (policyKey) => {
   if (customPolicyCache.has(policyKey)) {
     return customPolicyCache.get(policyKey);
@@ -493,9 +502,16 @@ const ensureCustomPolicyDefinition = async (policyKey) => {
   const definitionId = getCustomPolicyDefinitionId(subscriptionId, policyKey);
 
   try {
-    await policyClient.policyDefinitions.get(policyKey);
-    customPolicyCache.set(policyKey, definitionId);
-    return definitionId;
+    const existing = await policyClient.policyDefinitions.get(policyKey);
+    if (existing?.policyRule) {
+      customPolicyCache.set(policyKey, definitionId);
+      return definitionId;
+    }
+
+    logEvent('custom_policy_definition_repair_started', {
+      policyKey,
+      reason: 'missing_policy_rule'
+    });
   } catch (error) {
     if (Number(error?.statusCode || error?.status) !== 404) {
       throw error;
@@ -504,20 +520,13 @@ const ensureCustomPolicyDefinition = async (policyKey) => {
 
   logEvent('custom_policy_definition_create_started', { policyKey });
 
-  await policyClient.policyDefinitions.createOrUpdate(policyKey, {
-    policyDefinition: {
-      properties: {
-        displayName: definition.displayName,
-        description: definition.description,
-        policyType: 'Custom',
-        mode: definition.mode,
-        parameters: definition.parameters,
-        policyRule: definition.policyRule
-      }
-    }
-  });
+  await policyClient.policyDefinitions.createOrUpdate(
+    policyKey,
+    buildPolicyDefinitionPayload(definition)
+  );
 
   logEvent('custom_policy_definition_create_success', { policyKey, definitionId });
+
   customPolicyCache.set(policyKey, definitionId);
   return definitionId;
 };

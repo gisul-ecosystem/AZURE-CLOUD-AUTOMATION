@@ -15,7 +15,12 @@ const SERVICE_PRICING_MAP = {
   'azure functions': 'Azure App Service',
   'azure key vault': 'Key Vault',
   'azure cosmos db': 'Azure Cosmos DB',
-  'azure kubernetes service (aks)': 'Azure Kubernetes Service'
+  'azure kubernetes service (aks)': 'Azure Kubernetes Service',
+  'azure ai document intelligence': 'Foundry Tools',
+  'document intelligence': 'Foundry Tools',
+  'azure ai vision': 'Foundry Tools',
+  'azure ai language': 'Foundry Tools',
+  'azure ai speech': 'Foundry Tools'
 };
 
 const normalizeServiceKey = (value) => {

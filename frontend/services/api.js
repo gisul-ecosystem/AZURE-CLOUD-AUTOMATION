@@ -367,3 +367,112 @@ export async function forceLogoutUser(requestId, userId) {
     body: { requestId, userId }
   });
 }
+
+const orgAdminHeaders = (sessionToken) => ({
+  'x-org-admin-session': sessionToken
+});
+
+export async function loginOrgAdmin({ email, username, password }) {
+  return requestJson('/api/org-admin/login', {
+    method: 'POST',
+    body: { email, username, password }
+  });
+}
+
+export async function listOrgResourceGroups(sessionToken) {
+  return requestJson('/api/org-admin/resource-groups', {
+    headers: orgAdminHeaders(sessionToken)
+  });
+}
+
+export async function getOrgResourceGroupDetail(sessionToken, requestId) {
+  return requestJson(`/api/org-admin/resource-groups/${encodeURIComponent(requestId)}`, {
+    headers: orgAdminHeaders(sessionToken)
+  });
+}
+
+export async function getOrgMonitoringLogs(sessionToken, requestId, options = {}) {
+  const params = new URLSearchParams();
+
+  if (options.userId) {
+    params.set('userId', String(options.userId));
+  }
+
+  if (options.limit) {
+    params.set('limit', String(options.limit));
+  }
+
+  const query = params.toString();
+  const path = query
+    ? `/api/org-admin/resource-groups/${encodeURIComponent(requestId)}/monitoring?${query}`
+    : `/api/org-admin/resource-groups/${encodeURIComponent(requestId)}/monitoring`;
+
+  return requestJson(path, {
+    headers: orgAdminHeaders(sessionToken)
+  });
+}
+
+export async function deleteOrgAdminUser(sessionToken, requestId, userId) {
+  return requestJson(
+    `/api/org-admin/resource-groups/${encodeURIComponent(requestId)}/users/${encodeURIComponent(userId)}`,
+    {
+      method: 'DELETE',
+      headers: orgAdminHeaders(sessionToken)
+    }
+  );
+}
+
+export async function updateOrgAdminUserRoles(sessionToken, requestId, userId, roles) {
+  return requestJson(
+    `/api/org-admin/resource-groups/${encodeURIComponent(requestId)}/users/${encodeURIComponent(userId)}/roles`,
+    {
+      method: 'PATCH',
+      headers: orgAdminHeaders(sessionToken),
+      body: { roles }
+    }
+  );
+}
+
+export async function createAdminAccessRequest(payload) {
+  return requestJson('/api/admin-access-requests', {
+    method: 'POST',
+    body: payload
+  });
+}
+
+export async function listOrgAccessRequests(sessionToken, options = {}) {
+  const params = new URLSearchParams();
+
+  if (options.status) {
+    params.set('status', String(options.status));
+  }
+
+  if (options.requestId) {
+    params.set('requestId', String(options.requestId));
+  }
+
+  const query = params.toString();
+  const path = query ? `/api/org-admin/access-requests?${query}` : '/api/org-admin/access-requests';
+
+  return requestJson(path, {
+    headers: orgAdminHeaders(sessionToken)
+  });
+}
+
+export async function reviewOrgAccessRequest(sessionToken, id, payload) {
+  return requestJson(`/api/org-admin/access-requests/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    headers: orgAdminHeaders(sessionToken),
+    body: payload
+  });
+}
+
+export async function forceOrgAdminLogout(sessionToken, requestId, userId) {
+  return requestJson(
+    `/api/org-admin/resource-groups/${encodeURIComponent(requestId)}/users/${encodeURIComponent(userId)}/force-logout`,
+    {
+      method: 'POST',
+      headers: orgAdminHeaders(sessionToken)
+    }
+  );
+}

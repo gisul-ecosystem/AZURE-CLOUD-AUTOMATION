@@ -1,6 +1,9 @@
 const { Client } = require('@microsoft/microsoft-graph-client');
 const { ClientSecretCredential } = require('@azure/identity');
 const db = require('../db/postgres');
+const { evaluateUsageAccess } = require('./usageAccessEvaluator');
+const usageEnforcementService = require('./usageEnforcementService');
+const { resetDailyCountersIfNeeded } = require('./usageMiddlewareHelper');
 
 /**
  * Create Microsoft Graph client with app-only authentication
@@ -30,6 +33,54 @@ const createGraphClient = () => {
   return client;
 };
 
+// Sign-in failures that still mean the user reached Azure Portal auth (temp password / force-change flow).
+const PASSWORD_INDEPENDENT_ERROR_CODES = new Set([
+  50055, // Password expired
+  50125, // Sign-in interrupted (password reset or registration)
+  50056 // Invalid or expired password
+]);
+
+const isTrackableSignIn = (signIn) => {
+  const errorCode = Number(signIn.status?.errorCode ?? -1);
+  return errorCode === 0 || PASSWORD_INDEPENDENT_ERROR_CODES.has(errorCode);
+};
+
+const isSignInAlreadyProcessed = async (signInId) => {
+  if (!signInId) {
+    return false;
+  }
+
+  try {
+    const result = await db.query(
+      'SELECT 1 FROM processed_azure_signins WHERE signin_id = $1 LIMIT 1',
+      [signInId]
+    );
+    return result.rows.length > 0;
+  } catch (error) {
+    console.warn('[SIGNIN_MONITOR] Sign-in dedupe unavailable:', error.message);
+    return false;
+  }
+};
+
+const markSignInProcessed = async ({ signInId, azureUserId, requestId, userId }) => {
+  if (!signInId) {
+    return;
+  }
+
+  try {
+    await db.query(
+      `
+      INSERT INTO processed_azure_signins (signin_id, azure_user_id, request_id, user_id)
+      VALUES ($1, $2, $3, $4)
+      ON CONFLICT (signin_id) DO NOTHING
+      `,
+      [signInId, azureUserId, requestId, userId]
+    );
+  } catch (error) {
+    console.warn('[SIGNIN_MONITOR] Could not record processed sign-in:', error.message);
+  }
+};
+
 /**
  * Monitor Azure sign-ins and create sessions automatically
  * Only tracks users created by our provisioning automation
@@ -48,14 +99,22 @@ const monitorAzureSignIns = async () => {
     
     const trackedUsersResult = await db.query(
       `
-      SELECT 
-        id,
-        request_id,
-        username,
-        azure_user_id,
-        blocked_until
-      FROM azure_users
-      WHERE COALESCE(is_deleted, false) = false
+      SELECT
+        au.id,
+        au.request_id,
+        au.username,
+        au.azure_user_id,
+        au.blocked_until,
+        au.used_today_minutes,
+        au.last_reset_date,
+        r.enable_daily_usage,
+        r.daily_limit_minutes,
+        r.usage_schedule,
+        r.enforce_in_azure
+      FROM azure_users au
+      JOIN requests r ON r.id = au.request_id
+      WHERE COALESCE(au.is_deleted, false) = false
+        AND r.enable_daily_usage = true
       `
     );
 
@@ -101,20 +160,38 @@ const monitorAzureSignIns = async () => {
         continue; // Silent skip - not our provisioned user
       }
 
-      // Skip failed sign-ins
-      if (signIn.status?.errorCode !== 0) {
-        continue; // Silent skip for failed logins
+      const errorCode = Number(signIn.status?.errorCode ?? -1);
+      const signInSucceeded = errorCode === 0;
+
+      if (!isTrackableSignIn(signIn)) {
+        console.log(
+          `[SIGNIN_FAILED] ${signIn.userPrincipalName || 'Unknown'} | ` +
+          `errorCode=${errorCode} | ` +
+          `reason=${signIn.status?.failureReason || 'unknown'} | ` +
+          `app=${signIn.appDisplayName || 'Unknown'}`
+        );
+        continue;
       }
 
       trackedCount++;
 
-      // STEP 3: Log ONLY tracked user sign-ins
-      console.log(
-        `[SIGNIN] ${signIn.userPrincipalName || 'Unknown'} | ` +
-        `${signIn.createdDateTime} | ` +
-        `App: ${signIn.appDisplayName || 'Unknown'} | ` +
-        `Resource: ${signIn.resourceDisplayName || 'Unknown'}`
-      );
+      // STEP 3: Log tracked user sign-ins (success or password-change flow)
+      if (signInSucceeded) {
+        console.log(
+          `[SIGNIN] ${signIn.userPrincipalName || 'Unknown'} | ` +
+          `${signIn.createdDateTime} | ` +
+          `App: ${signIn.appDisplayName || 'Unknown'} | ` +
+          `Resource: ${signIn.resourceDisplayName || 'Unknown'}`
+        );
+      } else {
+        console.log(
+          `[SIGNIN_PASSWORD_FLOW] ${signIn.userPrincipalName || 'Unknown'} | ` +
+          `${signIn.createdDateTime} | ` +
+          `errorCode=${errorCode} | ` +
+          `reason=${signIn.status?.failureReason || 'unknown'} | ` +
+          `App: ${signIn.appDisplayName || 'Unknown'}`
+        );
+      }
 
       // STEP 4: Filter Azure Portal logins only
       const allowedApps = [
@@ -172,22 +249,62 @@ const monitorAzureSignIns = async () => {
 
       const userPrincipalName = signIn.userPrincipalName;
       const loginTime = new Date(signIn.createdDateTime);
+      const signInId = signIn.id || null;
 
       // Get user from map
       const user = trackedUsersMap.get(azureUserId);
+
+      if (await isSignInAlreadyProcessed(signInId)) {
+        continue;
+      }
 
       // STEP 5: Log tracked user match
       console.log(
         `[TRACKED_USER] username=${user.username}, request=${user.request_id}`
       );
 
-      // STEP 6: Continue with existing session logic
-      
-      // Check if user is blocked
-      if (user.blocked_until && new Date(user.blocked_until) > new Date()) {
+      const request = {
+        enable_daily_usage: user.enable_daily_usage,
+        daily_limit_minutes: user.daily_limit_minutes,
+        usage_schedule: user.usage_schedule
+      };
+      const refreshedUser = await resetDailyCountersIfNeeded(request, user, user.id, user.request_id);
+      const access = evaluateUsageAccess({
+        request,
+        user: refreshedUser,
+        currentSessionMinutes: 0,
+        at: loginTime
+      });
+
+      if (!access.allowed) {
         console.log(
-          `[SIGNIN_MONITOR] User ${user.id} is blocked until ${user.blocked_until}. Skipping session creation.`
+          `[SIGNIN_MONITOR] User ${user.id} denied Azure session (${access.reason}): ${access.message}`
         );
+
+        if (user.enforce_in_azure) {
+          if (access.reason === 'limit_exceeded') {
+            usageEnforcementService
+              .enforceUsageLimit({ requestId: user.request_id, userId: user.id })
+              .catch((error) => console.error('[SIGNIN_MONITOR] Enforcement error:', error.message));
+          } else {
+            usageEnforcementService
+              .enforceScheduleViolation({
+                requestId: user.request_id,
+                userId: user.id,
+                reason: access.reason,
+                blockedUntil: access.blockedUntil,
+                message: access.message
+              })
+              .catch((error) => console.error('[SIGNIN_MONITOR] Schedule enforcement error:', error.message));
+          }
+        }
+
+        await markSignInProcessed({
+          signInId,
+          azureUserId,
+          requestId: user.request_id,
+          userId: user.id
+        });
         continue;
       }
 
@@ -208,6 +325,12 @@ const monitorAzureSignIns = async () => {
         console.log(
           `[ACTIVE_SESSION_EXISTS] User ${user.id} already has an active session (ID: ${sessionCheck.rows[0].id}). Skipping.`
         );
+        await markSignInProcessed({
+          signInId,
+          azureUserId,
+          requestId: user.request_id,
+          userId: user.id
+        });
         continue;
       }
 
@@ -245,6 +368,13 @@ const monitorAzureSignIns = async () => {
       console.log(
         `[SESSION_CREATED] Session ${sessionId} created for user ${user.id} (${user.username}) from Azure sign-in at ${loginTime.toISOString()}`
       );
+
+      await markSignInProcessed({
+        signInId,
+        azureUserId,
+        requestId: user.request_id,
+        userId: user.id
+      });
     }
 
     // STEP 7: Summary

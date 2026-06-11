@@ -18,6 +18,8 @@ const pricingRoutes = require('./src/routes/pricingRoutes');
 const servicePricingRoutes = require('./src/routes/servicePricingRoutes');
 const requestRoutes = require('./src/routes/requestRoutes');
 const usageRoutes = require('./src/routes/usageRoutes');
+const orgAdminRoutes = require('./src/routes/orgAdminRoutes');
+const adminAccessRequestRoutes = require('./src/routes/adminAccessRequestRoutes');
 const serviceRoutes = require('./src/routes/serviceRoutes');
 const AppError = require('./src/utils/AppError');
 const { pool } = require('./src/config/database');
@@ -60,8 +62,10 @@ app.use('/api/pricing', pricingRoutes);
 console.log('pricing_routes_registered');
 app.use('/api/services/pricing', servicePricingRoutes);
 app.use('/api/requests', requestRoutes);
+app.use('/api/admin-access-requests', adminAccessRequestRoutes);
 app.use('/api/services', serviceRoutes);
 app.use('/api/usage', usageRoutes);
+app.use('/api/org-admin', orgAdminRoutes);
 
 app.all('*', (req, res, next) => {
   next(new AppError(`Route not found: ${req.originalUrl}`, 404));
