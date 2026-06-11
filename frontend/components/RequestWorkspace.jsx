@@ -6,6 +6,7 @@ import PricingSummary from './PricingSummary';
 import RequestForm from './RequestForm';
 import RequestTimeline from './RequestTimeline';
 import { calculatePricingEstimate, createRequestWithPricing, getAvailableInstances } from '../services/api';
+import useAzurePricing from '../hooks/useAzurePricing';
 import useLocations from '../hooks/useLocations';
 import useServicePricing from '../hooks/useServicePricing';
 
@@ -282,6 +283,36 @@ export default function RequestWorkspace() {
     const selectedIds = new Set(selectedServices.map((id) => String(id)));
     return pricedServices.filter((service) => selectedIds.has(String(service.id)));
   }, [pricedServices, selectedServices]);
+
+  const {
+    pricingByServiceId: livePricingByServiceId,
+    loading: livePricingLoading,
+    error: livePricingError
+  } = useAzurePricing({
+    services: selectedCatalogServices,
+    region: form.location,
+    selectedInstancesByServiceId
+  });
+
+  const livePricingItems = useMemo(
+    () =>
+      selectedCatalogServices.map((service) => {
+        const pricing = livePricingByServiceId[Number(service.id)] || {};
+        const serviceName = service.name || service.service_name || service.azure_role || service.category || 'Unnamed service';
+        const sku = String(selectedInstancesByServiceId[Number(service.id)] || selectedInstancesByServiceId[String(service.id)] || '').trim();
+
+        return {
+          key: `${service.id}-${form.location || 'no-region'}-${sku || 'no-sku'}`,
+          name: serviceName,
+          region: pricing.location || form.location || '',
+          sku: pricing.sku || sku || '',
+          unit: pricing.unit || '',
+          displayPrice: pricing.displayPrice || null,
+          message: pricing.message || 'Pricing unavailable'
+        };
+      }),
+    [form.location, livePricingByServiceId, selectedCatalogServices, selectedInstancesByServiceId]
+  );
 
   const selectedServiceInstanceEntries = useMemo(() => {
     return selectedCatalogServices.map((catalogService) => {
@@ -828,14 +859,17 @@ export default function RequestWorkspace() {
         />
 
         <div className="stack">
-          <PricingSummary
-            totalPrice={pricing.totalPrice}
-            basePrice={pricing.basePrice}
-            duration={pricing.duration}
-            accounts={pricing.accounts}
+            <PricingSummary
+              totalPrice={pricing.totalPrice}
+              basePrice={pricing.basePrice}
+              duration={pricing.duration}
+              accounts={pricing.accounts}
             loading={pricing.loading}
             error={pricing.error}
             selectedServiceCount={pricing.services}
+            livePrices={livePricingItems}
+            livePricingLoading={livePricingLoading}
+            livePricingError={livePricingError}
           />
 
           <RequestTimeline

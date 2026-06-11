@@ -364,9 +364,10 @@ export default function RequestForm({
                 ) : (
                   locations.map((region, index) => {
                     const label = region.display_location || region.label || region.arm_region_name || region.value;
+
                     return (
                       <option key={region.arm_region_name || region.value} value={region.arm_region_name || region.value}>
-                        {getRegionRankLabel(index)} {label} ({formatMoney(region.basePrice)}/day)
+                        {getRegionRankLabel(index)} {label} (estimated {formatMoney(region.basePrice)}/day)
                       </option>
                     );
                   })
@@ -374,7 +375,7 @@ export default function RequestForm({
               </select>
               {locationsError ? <span className="inline-note">{locationsError}</span> : null}
               <span className="inline-note">
-                Daily Azure retail estimate for the selected services and instance sizes. Final total also includes users and date range.
+                The region list shows estimated daily ranking cost. Live Azure billing rates appear in the pricing panel.
               </span>
             </label>
           </div>

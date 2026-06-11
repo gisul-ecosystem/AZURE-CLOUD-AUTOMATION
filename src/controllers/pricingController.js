@@ -1,5 +1,6 @@
 const AppError = require('../utils/AppError');
 const pricingService = require('../services/pricingService');
+const { lookupAzureRetailPrice } = require('../services/azurePricingService');
 const { parseFlexibleDateTime } = require('../utils/dateTime');
 
 const allowedPricingFields = new Set([
@@ -11,6 +12,7 @@ const allowedPricingFields = new Set([
   'selectedInstances',
   'selectedRoles'
 ]);
+const allowedRetailPricingQueryParams = new Set(['service', 'region', 'sku']);
 const DEFAULT_LOCATION = 'eastus';
 const DEFAULT_START_DATE = () => new Date().toISOString().slice(0, 10);
 const DEFAULT_END_DATE = () => new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10);
@@ -58,6 +60,26 @@ const validatePricingPayload = (body) => {
 
   if (new Set(serviceIds).size !== serviceIds.length) {
     throw new AppError('serviceIds must not contain duplicates.', 400);
+  }
+};
+
+const validateRetailPricingQuery = (query) => {
+  const invalidFields = Object.keys(query).filter((field) => !allowedRetailPricingQueryParams.has(field));
+
+  if (invalidFields.length > 0) {
+    throw new AppError(`Invalid query parameter(s): ${invalidFields.join(', ')}`, 400);
+  }
+
+  if (typeof query.service !== 'string' || query.service.trim().length === 0) {
+    throw new AppError('service must be a non-empty string.', 400);
+  }
+
+  if (typeof query.region !== 'string' || query.region.trim().length === 0) {
+    throw new AppError('region must be a non-empty string.', 400);
+  }
+
+  if (query.sku !== undefined && typeof query.sku !== 'string') {
+    throw new AppError('sku must be a string when provided.', 400);
   }
 };
 
@@ -128,6 +150,23 @@ const calculatePricing = async (req, res, next) => {
   }
 };
 
+const getRetailPricing = async (req, res, next) => {
+  try {
+    validateRetailPricingQuery(req.query);
+
+    const pricing = await lookupAzureRetailPrice({
+      service: req.query.service,
+      region: req.query.region,
+      sku: req.query.sku
+    });
+
+    res.status(200).json(pricing);
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
-  calculatePricing
+  calculatePricing,
+  getRetailPricing
 };

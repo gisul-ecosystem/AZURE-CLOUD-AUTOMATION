@@ -7,8 +7,13 @@ export default function PricingSummary({
   loading = false,
   error = '',
   accounts = 0,
-  selectedServiceCount = 0
+  selectedServiceCount = 0,
+  livePrices = [],
+  livePricingLoading = false,
+  livePricingError = ''
 }) {
+  const hasLivePrices = Array.isArray(livePrices) && livePrices.length > 0;
+
   return (
     <section className="panel pricing-summary">
       <div className="panel__heading">
@@ -56,6 +61,48 @@ export default function PricingSummary({
           <span>Status</span>
           <strong>{error ? 'Error' : loading ? 'Loading' : 'Ready'}</strong>
         </div>
+      </div>
+
+      <div className="panel" style={{ marginTop: 18 }}>
+        <div className="panel__heading" style={{ marginBottom: 12 }}>
+          <div>
+            <h4 style={{ marginBottom: 4 }}>Live Azure Retail Billing</h4>
+            <p>
+              {livePricingLoading
+                ? 'Fetching latest Azure pricing...'
+                : 'Current retail prices update as service, region, or instance selections change.'}
+            </p>
+          </div>
+          <span className="helper-badge">{livePricingLoading ? 'Refreshing' : 'Cached for 30m'}</span>
+        </div>
+
+        {livePricingError ? <div className="error-box">{livePricingError}</div> : null}
+
+        {livePricingLoading ? <div className="inline-note">Fetching latest Azure pricing...</div> : null}
+
+        {!livePricingLoading && !hasLivePrices ? (
+          <div className="service-collection__empty">
+            <p>Select a service, region, and instance to view live Azure Retail pricing.</p>
+          </div>
+        ) : null}
+
+        {hasLivePrices ? (
+          <div className="pricing-summary__live-list">
+            {livePrices.map((item) => (
+              <div key={item.key} className="meta-pill" style={{ alignItems: 'flex-start', gap: 6 }}>
+                <span>{item.name}</span>
+                <strong>{item.displayPrice || item.message || 'Pricing unavailable'}</strong>
+                <span className="inline-note">
+                  {item.unit ? `Azure unit: ${item.unit}` : 'Azure unit unavailable'}
+                </span>
+                <span className="inline-note">
+                  {item.region ? `Region: ${item.region}` : ''}
+                  {item.sku ? `${item.region ? ' · ' : ''}SKU: ${item.sku}` : ''}
+                </span>
+              </div>
+            ))}
+          </div>
+        ) : null}
       </div>
 
       {error ? <div className="error-box">{error}</div> : null}

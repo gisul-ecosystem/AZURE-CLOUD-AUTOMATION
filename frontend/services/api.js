@@ -186,6 +186,25 @@ export async function getServicePricing(location = 'eastus') {
   return payload?.services || payload?.data || payload || [];
 }
 
+export async function getAzurePricing({ service, region, sku } = {}) {
+  const params = new URLSearchParams();
+
+  if (service) {
+    params.set('service', String(service).trim());
+  }
+
+  if (region) {
+    params.set('region', String(region).trim());
+  }
+
+  if (sku) {
+    params.set('sku', String(sku).trim());
+  }
+
+  const query = params.toString();
+  return requestJson(`/api/pricing${query ? `?${query}` : ''}`);
+}
+
 export async function createRequest(payload) {
   const response = await requestJson('/api/requests', {
     method: 'POST',

@@ -9,6 +9,7 @@ router.get('/health', (req, res) => {
   });
 });
 
+router.get('/', pricingController.getRetailPricing);
 router.post('/calculate', pricingController.calculatePricing);
 
 module.exports = router;
