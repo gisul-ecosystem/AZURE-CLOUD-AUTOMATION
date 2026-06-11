@@ -1,5 +1,6 @@
 const db = require('../db/postgres');
 const { filterVmInstancesForLocation } = require('./vmInstanceAvailabilityService');
+const { enrichInstances } = require('./instanceEnrichmentService');
 const { findInstancePolicyRule, normalizeServiceName } = require('../utils/instancePolicyRules');
 
 const filterInstancesForLocation = async (location, instances, servicesById) => {
@@ -55,7 +56,8 @@ const getAvailableInstancesForLocation = async (location, serviceIds) => {
       `
         SELECT
           id,
-          name
+          name,
+          COALESCE(price_per_user, 0) AS price_per_user
         FROM services
         WHERE id = ANY($1::int[])
       `,
@@ -64,7 +66,14 @@ const getAvailableInstancesForLocation = async (location, serviceIds) => {
   ]);
 
   const servicesById = new Map(
-    servicesResult.rows.map((row) => [Number(row.id), { id: Number(row.id), name: row.name }])
+    servicesResult.rows.map((row) => [
+      Number(row.id),
+      {
+        id: Number(row.id),
+        name: row.name,
+        price_per_user: Number(row.price_per_user || 0)
+      }
+    ])
   );
 
   const instances = instancesResult.rows.map((row) => ({
@@ -76,17 +85,12 @@ const getAvailableInstancesForLocation = async (location, serviceIds) => {
 
   const normalizedLocation = String(location || '').trim().toLowerCase();
   if (!normalizedLocation) {
-    return instances;
+    return enrichInstances(instances, servicesById);
   }
 
   const filtered = await filterInstancesForLocation(normalizedLocation, instances, servicesById);
 
-  return filtered.map((instance) => ({
-    id: instance.id,
-    serviceId: instance.serviceId,
-    option_name: instance.option_name,
-    sort_order: instance.sort_order
-  }));
+  return enrichInstances(filtered, servicesById, normalizedLocation);
 };
 
 const serviceSupportsInstances = (serviceName) => Boolean(findInstancePolicyRule(serviceName));

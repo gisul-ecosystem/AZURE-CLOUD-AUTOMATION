@@ -7,7 +7,38 @@ const currencyFormatter = new Intl.NumberFormat('en-US', {
 
 const numberFormatter = new Intl.NumberFormat('en-US');
 
+const formatCurrencyWithDigits = (value, currency, maximumFractionDigits) =>
+  new Intl.NumberFormat('en-US', {
+    style: 'currency',
+    currency,
+    minimumFractionDigits: 2,
+    maximumFractionDigits
+  }).format(Number(value || 0));
+
 export const formatCurrency = (value) => currencyFormatter.format(Number(value || 0));
+
+/** Shows small per-day amounts (e.g. $0.0001) instead of rounding to $0. */
+export const formatPreciseCurrency = (value, currency = 'USD') => {
+  const amount = Number(value);
+
+  if (!Number.isFinite(amount)) {
+    return formatCurrencyWithDigits(0, currency, 2);
+  }
+
+  if (amount === 0) {
+    return formatCurrencyWithDigits(0, currency, 2);
+  }
+
+  if (amount < 0.01) {
+    return formatCurrencyWithDigits(amount, currency, 6);
+  }
+
+  if (amount < 1) {
+    return formatCurrencyWithDigits(amount, currency, 4);
+  }
+
+  return formatCurrencyWithDigits(amount, currency, 2);
+};
 
 export const formatCompactNumber = (value) => numberFormatter.format(Number(value || 0));
 

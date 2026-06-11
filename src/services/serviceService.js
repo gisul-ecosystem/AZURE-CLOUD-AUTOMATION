@@ -336,12 +336,24 @@ const getServiceBundle = async () => {
     location: row.location || row.arm_region_name
   }));
 
-  const instances = instancesResult.rows.map((row) => ({
-    id: Number(row.id),
-    serviceId: Number(row.service_id),
-    option_name: row.option_name,
-    sort_order: Number(row.sort_order)
-  }));
+  const { resolveInstanceGuide } = require('../config/instanceCatalog');
+
+  const servicesByIdForGuides = new Map(
+    servicesResult.rows.map((service) => [Number(service.id), service])
+  );
+
+  const instances = instancesResult.rows.map((row) => {
+    const serviceId = Number(row.service_id);
+    const optionName = row.option_name;
+
+    return {
+      id: Number(row.id),
+      serviceId,
+      option_name: optionName,
+      sort_order: Number(row.sort_order),
+      guide: resolveInstanceGuide(servicesByIdForGuides.get(serviceId)?.name, optionName)
+    };
+  });
 
   const tierRoleMappings = instanceRoleMappings.map((row) => ({
     serviceId: Number(row.serviceId),
