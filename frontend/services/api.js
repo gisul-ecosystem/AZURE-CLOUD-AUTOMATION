@@ -79,12 +79,32 @@ export async function getLocations() {
   return payload?.data || payload || [];
 }
 
-export async function getServices(location = '') {
-  const resolvedLocation = typeof location === 'string' ? location.trim() : '';
-  const endpoint = resolvedLocation
-    ? `/api/services?location=${encodeURIComponent(resolvedLocation)}`
-    : '/api/services';
+export async function getServices(options = {}) {
+  const resolvedOptions =
+    typeof options === 'string'
+      ? { location: options }
+      : options && typeof options === 'object'
+        ? options
+        : {};
+
+  const params = new URLSearchParams();
+
+  if (resolvedOptions.location) {
+    params.set('location', String(resolvedOptions.location).trim());
+  }
+
+  if (resolvedOptions.category) {
+    params.set('category', String(resolvedOptions.category).trim());
+  }
+
+  const query = params.toString();
+  const endpoint = query ? `/api/services?${query}` : '/api/services';
   const payload = await requestJson(endpoint);
+
+  if (payload?.services && Array.isArray(payload.services)) {
+    return payload;
+  }
+
   return payload?.data || payload || [];
 }
 
@@ -104,7 +124,28 @@ export async function getServiceCatalog() {
   return payload?.services || payload?.data || payload || [];
 }
 
-export async function getAvailableLocations(serviceIds = []) {
+export async function getAvailableInstances(location, serviceIds = []) {
+  const resolvedLocation = String(location || '').trim();
+  const resolvedServiceIds = Array.from(
+    new Set(
+      (Array.isArray(serviceIds) ? serviceIds : [])
+        .map((serviceId) => Number(serviceId))
+        .filter((serviceId) => Number.isInteger(serviceId) && serviceId > 0)
+    )
+  );
+
+  if (!resolvedLocation || resolvedServiceIds.length === 0) {
+    return [];
+  }
+
+  const payload = await requestJson(
+    `/api/services/available-instances?location=${encodeURIComponent(resolvedLocation)}&serviceIds=${encodeURIComponent(resolvedServiceIds.join(','))}`
+  );
+
+  return payload?.instances || payload?.data || payload || [];
+}
+
+export async function getAvailableLocations(serviceIds = [], instanceSelections = '') {
   const resolvedServiceIds = Array.from(
     new Set(
       (Array.isArray(serviceIds) ? serviceIds : [])
@@ -117,11 +158,24 @@ export async function getAvailableLocations(serviceIds = []) {
     return [];
   }
 
-  const payload = await requestJson(
-    `/api/services/available-locations?serviceIds=${encodeURIComponent(resolvedServiceIds.join(','))}`
-  );
+  const params = new URLSearchParams({
+    serviceIds: resolvedServiceIds.join(',')
+  });
+
+  if (instanceSelections) {
+    params.set('instanceSelections', instanceSelections);
+  }
+
+  const payload = await requestJson(`/api/services/available-locations?${params.toString()}`);
 
   return payload?.locations || payload?.data || payload || [];
+}
+
+export async function calculatePricingEstimate(payload) {
+  return requestJson('/api/pricing/calculate', {
+    method: 'POST',
+    body: payload
+  });
 }
 
 export async function getServicePricing(location = 'eastus') {
@@ -167,6 +221,17 @@ export async function getProvisionStatus(requestId) {
 
 export async function provisionResourceGroup(requestId) {
   return requestJson(`/api/provision/request/${encodeURIComponent(requestId)}`, {
+    method: 'POST'
+  });
+}
+
+export async function getProvisionedServiceResources(requestId) {
+  const payload = await requestJson(`/api/provision/request/${encodeURIComponent(requestId)}/services`);
+  return payload?.resources || payload?.data || [];
+}
+
+export async function provisionServiceResources(requestId) {
+  return requestJson(`/api/provision/request/${encodeURIComponent(requestId)}/services`, {
     method: 'POST'
   });
 }
@@ -239,9 +304,10 @@ export const deleteAccessUser = deleteManageUser;
 export const updateAccessUserRoles = updateManageUserRoles;
 
 export async function fetchProvisionSnapshot(requestId) {
-  const [request, provision, users, roles, credentials] = await Promise.allSettled([
+  const [request, provision, services, users, roles, credentials] = await Promise.allSettled([
     getRequestById(requestId),
     getProvisionStatus(requestId),
+    getProvisionedServiceResources(requestId),
     getProvisionUsers(requestId),
     getProvisionRoles(requestId),
     getCredentialStatus(requestId)
@@ -250,6 +316,7 @@ export async function fetchProvisionSnapshot(requestId) {
   return {
     request: request.status === 'fulfilled' ? request.value : null,
     provision: provision.status === 'fulfilled' ? provision.value : null,
+    services: services.status === 'fulfilled' ? services.value : null,
     users: users.status === 'fulfilled' ? users.value : null,
     roles: roles.status === 'fulfilled' ? roles.value : null,
     credentials: credentials.status === 'fulfilled' ? credentials.value : null

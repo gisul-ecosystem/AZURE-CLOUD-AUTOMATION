@@ -14,7 +14,7 @@ export default function PricingSummary({
       <div className="panel__heading">
         <div>
           <h3>Pricing Summary</h3>
-          <p>Live estimate updates as the account count, selected services, and chosen region change.</p>
+          <p>Live estimate from Azure retail pricing based on users, services, instances, roles, region, and dates.</p>
         </div>
         <span className="helper-badge">Calculated in real time</span>
       </div>
@@ -31,9 +31,7 @@ export default function PricingSummary({
               : '-'}
         </strong>
         <span className="inline-note">
-          Pricing is based on {formatCompactNumber(selectedServiceCount)} selected service
-          {selectedServiceCount === 1 ? '' : 's'}, {formatCompactNumber(accounts)} account
-          {accounts === 1 ? '' : 's'}, and the selected date range.
+          Formula: daily service cost x duration x accounts. Includes Azure infrastructure, instance tiers, and portal fees.
         </span>
       </div>
 

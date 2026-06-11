@@ -1,6 +1,7 @@
 const db = require('../db/postgres');
 const { getAzureRetailPrice } = require('./azurePricingService');
 const azureCatalogSyncService = require('./azureCatalogSyncService');
+const { getLocationsForSelectedServices } = require('./azureLocationService');
 
 const CACHE_TTL_MS = 5 * 60 * 1000;
 const DEFAULT_LOCATION = process.env.AZURE_PRICING_DEFAULT_REGION || 'eastus';
@@ -201,6 +202,164 @@ const getActiveServices = async (category, location) => {
 
 const getDistinctLocations = async () => azureCatalogSyncService.getDistinctLocations();
 
+const normalizeServiceName = (value) =>
+  String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/^azure\s+/, '');
+
+const getServiceBundle = async () => {
+  const { loadInstanceRoleMappings } = require('./instanceRoleMappingService');
+
+  const [categoriesResult, servicesResult, rolesResult, regionsResult, catalogResult, instancesResult, instanceRoleMappings] =
+    await Promise.all([
+    db.query(
+      `
+        SELECT
+          id,
+          name
+        FROM service_categories
+        ORDER BY id
+      `
+    ),
+    db.query(
+      `
+        SELECT
+          id,
+          name,
+          category,
+          azure_role,
+          description,
+          price_per_user,
+          active,
+          COALESCE(enable_role_selection, true) AS enable_role_selection,
+          default_role,
+          COALESCE(role_required, true) AS role_required,
+          COALESCE(supports_instances, false) AS supports_instances,
+          COALESCE(supports_regions, true) AS supports_regions,
+          COALESCE(supports_pricing, true) AS supports_pricing,
+          COALESCE(supports_usage_limit, false) AS supports_usage_limit
+        FROM services
+        WHERE active = true
+        ORDER BY category, name
+      `
+    ),
+    db.query(
+      `
+        SELECT
+          id,
+          service_id,
+          azure_role
+        FROM service_role_mapping
+        ORDER BY service_id, azure_role
+      `
+    ),
+    db.query(
+      `
+        SELECT
+          arm_region_name,
+          MIN(display_location) AS display_location,
+          MIN(location) AS location
+        FROM service_locations
+        GROUP BY arm_region_name
+        ORDER BY arm_region_name
+      `
+    ),
+    db.query(
+      `
+        SELECT
+          service_name AS name,
+          COALESCE(service_family, 'General') AS category,
+          MIN(retail_price) AS price,
+          MIN(currency) AS currency,
+          COUNT(DISTINCT arm_region_name) AS location_count,
+          MIN(pricing_source) AS pricing_source
+        FROM service_locations
+        WHERE retail_price >= 0
+        GROUP BY service_name, service_family
+      `
+    ),
+    db
+      .query(
+        `
+          SELECT
+            id,
+            service_id,
+            option_name,
+            sort_order
+          FROM service_instance_options
+          ORDER BY service_id, sort_order, option_name
+        `
+      )
+      .catch(() => ({ rows: [] })),
+    loadInstanceRoleMappings()
+  ]);
+
+  const catalogByName = new Map();
+
+  catalogResult.rows.forEach((row) => {
+    catalogByName.set(normalizeServiceName(row.name), row);
+  });
+
+  const services = servicesResult.rows.map((service) => {
+    const catalog = catalogByName.get(normalizeServiceName(service.name));
+
+    return {
+      ...service,
+      price_per_user: Number(service.price_per_user),
+      active: Boolean(service.active),
+      enable_role_selection: Boolean(service.enable_role_selection),
+      role_required: Boolean(service.role_required),
+      supports_instances: Boolean(service.supports_instances),
+      supports_regions: Boolean(service.supports_regions),
+      supports_pricing: Boolean(service.supports_pricing),
+      supports_usage_limit: Boolean(service.supports_usage_limit),
+      service_name: service.name,
+      service_family: service.category,
+      retail_price: catalog ? Number(catalog.price) : Number(service.price_per_user || 0),
+      price: catalog ? Number(catalog.price) : Number(service.price_per_user || 0),
+      currency: catalog?.currency || 'USD',
+      location_count: catalog ? Number(catalog.location_count) : 0,
+      pricing_source: catalog?.pricing_source || 'database'
+    };
+  });
+
+  const roles = rolesResult.rows.map((row) => ({
+    id: Number(row.id),
+    serviceId: Number(row.service_id),
+    azure_role: row.azure_role
+  }));
+
+  const regions = regionsResult.rows.map((row) => ({
+    arm_region_name: row.arm_region_name,
+    display_location: row.display_location || row.arm_region_name,
+    location: row.location || row.arm_region_name
+  }));
+
+  const instances = instancesResult.rows.map((row) => ({
+    id: Number(row.id),
+    serviceId: Number(row.service_id),
+    option_name: row.option_name,
+    sort_order: Number(row.sort_order)
+  }));
+
+  const tierRoleMappings = instanceRoleMappings.map((row) => ({
+    serviceId: Number(row.serviceId),
+    instanceOption: row.instanceOption,
+    azureRole: row.azureRole,
+    tierAutomated: Boolean(row.tierAutomated)
+  }));
+
+  return {
+    categories: categoriesResult.rows,
+    services,
+    roles,
+    regions,
+    instances,
+    instanceRoleMappings: tierRoleMappings
+  };
+};
+
 const getServiceCatalog = async () => {
   const query = `
     SELECT
@@ -222,7 +381,42 @@ const getServiceCatalog = async () => {
   return result.rows;
 };
 
-const getAvailableLocations = async (serviceIds) => {
+const parseInstanceSelections = (value) => {
+  if (!value) {
+    return {};
+  }
+
+  if (Array.isArray(value)) {
+    return value.reduce((accumulator, entry) => {
+      const serviceId = Number(entry?.serviceId ?? entry?.service_id);
+      const instanceOption = String(entry?.instanceOption ?? entry?.instance_option ?? '').trim();
+
+      if (Number.isInteger(serviceId) && serviceId > 0 && instanceOption) {
+        accumulator[serviceId] = instanceOption;
+      }
+
+      return accumulator;
+    }, {});
+  }
+
+  if (typeof value !== 'string' || value.trim().length === 0) {
+    return {};
+  }
+
+  return value.split(',').reduce((accumulator, pair) => {
+    const [rawServiceId, ...optionParts] = pair.split(':');
+    const serviceId = Number(String(rawServiceId || '').trim());
+    const instanceOption = optionParts.join(':').trim();
+
+    if (Number.isInteger(serviceId) && serviceId > 0 && instanceOption) {
+      accumulator[serviceId] = instanceOption;
+    }
+
+    return accumulator;
+  }, {});
+};
+
+const getAvailableLocations = async (serviceIds, selectedInstances = {}) => {
   const normalizedServiceIds = Array.from(
     new Set(
       (Array.isArray(serviceIds) ? serviceIds : [])
@@ -235,74 +429,28 @@ const getAvailableLocations = async (serviceIds) => {
     return [];
   }
 
-  const selectedNamesResult = await db.query(
-    `
-      SELECT
-        id,
-        name
-      FROM services
-      WHERE id = ANY($1::int[])
-    `,
-    [normalizedServiceIds]
+  const { loadPricingContext } = require('./estimatePricingService');
+  const { services, instancesByServiceId } = await loadPricingContext(normalizedServiceIds);
+  const selectedInstancesByServiceId = parseInstanceSelections(selectedInstances);
+
+  const locations = await getLocationsForSelectedServices(
+    services,
+    instancesByServiceId,
+    selectedInstancesByServiceId
   );
-
-  const selectedNames = Array.from(
-    new Set(
-      selectedNamesResult.rows
-        .map((row) => row.name)
-        .filter((name) => typeof name === 'string' && name.trim().length > 0)
-    )
-  );
-
-  if (selectedNames.length === 0) {
-    const fallbackNamesResult = await db.query(
-      `
-        SELECT DISTINCT
-          service_name AS name
-        FROM service_locations
-        WHERE id = ANY($1::int[])
-      `,
-      [normalizedServiceIds]
-    );
-
-    fallbackNamesResult.rows.forEach((row) => {
-      if (typeof row.name === 'string' && row.name.trim().length > 0) {
-        selectedNames.push(row.name);
-      }
-    });
-  }
-
-  const query = `
-    SELECT
-      sl.arm_region_name,
-      MIN(sl.display_location) AS display_location,
-      MIN(sl.retail_price) AS base_price,
-      MIN(sl.currency) AS currency,
-      COUNT(DISTINCT sl.service_name) AS matched
-    FROM service_locations sl
-    WHERE EXISTS (
-      SELECT 1
-      FROM unnest($1::text[]) AS selected_name(name)
-      WHERE LOWER(sl.service_name) ILIKE '%' || LOWER(selected_name.name) || '%'
-    )
-    GROUP BY sl.arm_region_name
-    ORDER BY base_price ASC
-  `;
-
-  const result = await db.query(query, [selectedNames]);
 
   console.log({
     selectedServiceIds: normalizedServiceIds,
-    selectedNames,
-    locationCount: result.rows.length
+    locationCount: locations.length,
+    source: 'azure-subscription-locations-with-retail-pricing'
   });
 
-  return result.rows.map((row) => ({
-    arm_region_name: row.arm_region_name,
-    display_location: row.display_location,
-    base_price: Number(row.base_price) || 0,
-    currency: row.currency || 'USD'
-  }));
+  return locations;
+};
+
+const getAvailableInstances = async (location, serviceIds) => {
+  const { getAvailableInstancesForLocation } = require('./instanceAvailabilityService');
+  return getAvailableInstancesForLocation(location, serviceIds);
 };
 
 const getServiceRoles = async (serviceId) => {
@@ -412,8 +560,10 @@ const getActiveServicesWithPricing = async (location) => {
 
 module.exports = {
   getActiveServices,
+  getServiceBundle,
   getServiceCatalog,
   getAvailableLocations,
+  getAvailableInstances,
   getServiceRoles,
   getActiveServicesWithPricing,
   getDistinctLocations

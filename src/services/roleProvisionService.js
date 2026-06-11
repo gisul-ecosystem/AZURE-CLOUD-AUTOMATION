@@ -62,6 +62,7 @@ const getSelectedRolesForRequest = async (client, requestId) => {
   return result.rows;
 };
 
+
 const getExistingAssignments = async (
 client,
 requestId,
@@ -260,7 +261,7 @@ subscriptionId
 }=
 createAuthorizationClient();
 
-const scope=
+const resourceGroupScope=
 buildResourceGroupScope(
 subscriptionId,
 request.azure_resource_group_name
@@ -289,10 +290,12 @@ role.azure_role
 continue;
 }
 
+const roleScope=resourceGroupScope;
+
 const definition=
 await findMatchingRoleDefinition(
 authorizationClient,
-scope,
+roleScope,
 role.azure_role
 );
 
@@ -302,7 +305,7 @@ continue;
 
 const assignmentId=
 roleAssignmentIdFromSeed(
-`${requestId}-${user.id}-${definition.id}`
+`${requestId}-${user.id}-${role.service_id}-${definition.id}`
 );
 
 try{
@@ -311,7 +314,7 @@ await createRoleAssignmentWithRetry(
 
 authorizationClient,
 
-scope,
+roleScope,
 
 assignmentId,
 
@@ -357,7 +360,7 @@ requestId,
 userId:user.id,
 assignmentId,
 azureRole:role.azure_role,
-scope,
+scope:roleScope,
 assignedAt:new Date()
 }
 );

@@ -5,7 +5,7 @@ import { useRouter } from 'next/navigation';
 import PricingSummary from './PricingSummary';
 import RequestForm from './RequestForm';
 import RequestTimeline from './RequestTimeline';
-import { createRequestWithPricing, getServiceRoles, getServices } from '../services/api';
+import { calculatePricingEstimate, createRequestWithPricing, getAvailableInstances } from '../services/api';
 import useLocations from '../hooks/useLocations';
 import useServicePricing from '../hooks/useServicePricing';
 
@@ -34,19 +34,15 @@ const getPositiveInteger = (value) => {
   return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
 };
 
-const normalizeServiceName = (value) =>
-  String(value || '')
-    .trim()
-    .toLowerCase()
-    .replace(/^azure\s+/, '');
-
 export default function RequestWorkspace() {
   const router = useRouter();
   const [selectedServices, setSelectedServices] = useState([]);
-  const [provisionableServices, setProvisionableServices] = useState([]);
-  const [provisionableServicesLoading, setProvisionableServicesLoading] = useState(true);
   const [serviceRolesByServiceId, setServiceRolesByServiceId] = useState({});
   const [selectedRolesByServiceId, setSelectedRolesByServiceId] = useState({});
+  const [selectedInstancesByServiceId, setSelectedInstancesByServiceId] = useState({});
+  const [instancesByServiceId, setInstancesByServiceId] = useState({});
+  const [instancesLoading, setInstancesLoading] = useState(false);
+  const [instancesError, setInstancesError] = useState('');
   const selectedServiceIds = useMemo(
     () =>
       selectedServices
@@ -54,7 +50,18 @@ export default function RequestWorkspace() {
         .filter((value) => Number.isInteger(value) && value > 0),
     [selectedServices]
   );
-  const { locations, loading: locationsLoading, error: locationsError } = useLocations(selectedServiceIds);
+  const instanceSelections = useMemo(
+    () =>
+      Object.entries(selectedInstancesByServiceId)
+        .filter(([, instanceOption]) => String(instanceOption || '').trim().length > 0)
+        .map(([serviceId, instanceOption]) => `${serviceId}:${instanceOption}`)
+        .join(','),
+    [selectedInstancesByServiceId]
+  );
+  const { locations, loading: locationsLoading, error: locationsError } = useLocations(
+    selectedServiceIds,
+    instanceSelections
+  );
   const [form, setForm] = useState({
     customerEmail: '',
     accountCount: '',
@@ -78,39 +85,163 @@ export default function RequestWorkspace() {
   const [submitting, setSubmitting] = useState(false);
   const {
     services: pricedServices,
+    categories,
+    roles: catalogRoles,
+    instances: catalogInstances,
+    instanceRoleMappings,
     loading: servicesLoading,
     error: servicesError
   } = useServicePricing();
 
   useEffect(() => {
-    let cancelled = false;
+    const nextRolesByServiceId = {};
 
-    const loadProvisionableServices = async () => {
-      setProvisionableServicesLoading(true);
+    catalogRoles.forEach((role) => {
+      const serviceId = Number(role.serviceId ?? role.service_id);
 
-      try {
-        const nextServices = await getServices();
-
-        if (!cancelled) {
-          setProvisionableServices(Array.isArray(nextServices) ? nextServices : []);
-        }
-      } catch (error) {
-        if (!cancelled) {
-          setProvisionableServices([]);
-        }
-      } finally {
-        if (!cancelled) {
-          setProvisionableServicesLoading(false);
-        }
+      if (!Number.isInteger(serviceId) || serviceId <= 0) {
+        return;
       }
+
+      if (!nextRolesByServiceId[serviceId]) {
+        nextRolesByServiceId[serviceId] = [];
+      }
+
+      nextRolesByServiceId[serviceId].push({
+        id: Number(role.id),
+        azure_role: role.azure_role
+      });
+    });
+
+    setServiceRolesByServiceId(nextRolesByServiceId);
+  }, [catalogRoles]);
+
+  const instanceRoleMappingIndex = useMemo(() => {
+    const index = new Map();
+
+    (instanceRoleMappings || []).forEach((mapping) => {
+      const serviceId = Number(mapping.serviceId ?? mapping.service_id);
+      const instanceOption = String(mapping.instanceOption ?? mapping.instance_option ?? '').trim().toLowerCase();
+
+      if (!Number.isInteger(serviceId) || serviceId <= 0 || !instanceOption) {
+        return;
+      }
+
+      if (!index.has(serviceId)) {
+        index.set(serviceId, new Map());
+      }
+
+      index.get(serviceId).set(instanceOption, mapping);
+    });
+
+    return index;
+  }, [instanceRoleMappings]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const selectedIdSet = new Set(selectedServices.map((id) => String(id)));
+    const instanceServiceIds = pricedServices
+      .filter((service) => selectedIdSet.has(String(service.id)) && service.supports_instances === true)
+      .map((service) => Number(service.id))
+      .filter((serviceId) => Number.isInteger(serviceId) && serviceId > 0);
+
+    const applyCatalogInstances = () => {
+      const nextInstancesByServiceId = {};
+
+      catalogInstances.forEach((instance) => {
+        const serviceId = Number(instance.serviceId ?? instance.service_id);
+
+        if (!instanceServiceIds.includes(serviceId)) {
+          return;
+        }
+
+        if (!nextInstancesByServiceId[serviceId]) {
+          nextInstancesByServiceId[serviceId] = [];
+        }
+
+        nextInstancesByServiceId[serviceId].push({
+          id: Number(instance.id),
+          option_name: instance.option_name
+        });
+      });
+
+      setInstancesByServiceId(nextInstancesByServiceId);
     };
 
-    loadProvisionableServices();
+    if (!form.location || instanceServiceIds.length === 0) {
+      applyCatalogInstances();
+      setInstancesLoading(false);
+      setInstancesError('');
+      return undefined;
+    }
+
+    setInstancesLoading(true);
+
+    getAvailableInstances(form.location, instanceServiceIds)
+      .then((instances) => {
+        if (cancelled) {
+          return;
+        }
+
+        const nextInstancesByServiceId = {};
+
+        instances.forEach((instance) => {
+          const serviceId = Number(instance.serviceId ?? instance.service_id);
+
+          if (!Number.isInteger(serviceId) || serviceId <= 0) {
+            return;
+          }
+
+          if (!nextInstancesByServiceId[serviceId]) {
+            nextInstancesByServiceId[serviceId] = [];
+          }
+
+          nextInstancesByServiceId[serviceId].push({
+            id: Number(instance.id),
+            option_name: instance.option_name
+          });
+        });
+
+        setInstancesByServiceId(nextInstancesByServiceId);
+        setInstancesError('');
+      })
+      .catch((error) => {
+        if (cancelled) {
+          return;
+        }
+
+        setInstancesError(error.message);
+        applyCatalogInstances();
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setInstancesLoading(false);
+        }
+      });
 
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [catalogInstances, form.location, pricedServices, selectedServices]);
+
+  useEffect(() => {
+    setSelectedInstancesByServiceId((current) => {
+      let changed = false;
+      const next = { ...current };
+
+      for (const [serviceId, instanceOption] of Object.entries(current)) {
+        const available = instancesByServiceId[serviceId] || [];
+        const optionNames = available.map((instance) => instance.option_name);
+
+        if (instanceOption && !optionNames.includes(instanceOption)) {
+          next[serviceId] = optionNames[0] || '';
+          changed = true;
+        }
+      }
+
+      return changed ? next : current;
+    });
+  }, [instancesByServiceId, form.location]);
 
   useEffect(() => {
     setForm((current) => (current.location ? { ...current, location: '' } : current));
@@ -152,41 +283,100 @@ export default function RequestWorkspace() {
     return pricedServices.filter((service) => selectedIds.has(String(service.id)));
   }, [pricedServices, selectedServices]);
 
-  const selectedServiceRoleEntries = useMemo(() => {
+  const selectedServiceInstanceEntries = useMemo(() => {
     return selectedCatalogServices.map((catalogService) => {
-      const matchedService = provisionableServices.find(
-        (service) => normalizeServiceName(service.name) === normalizeServiceName(catalogService.name)
+      const backendServiceId = Number(catalogService.id);
+      const availableInstances = backendServiceId ? instancesByServiceId[backendServiceId] || [] : [];
+      const selectedInstance = backendServiceId ? selectedInstancesByServiceId[backendServiceId] || '' : '';
+      const supportsInstances = catalogService.supports_instances === true;
+      const tierAutomatedRole = backendServiceId
+        ? instanceRoleMappingIndex.get(backendServiceId)?.get(String(selectedInstance || '').trim().toLowerCase())
+            ?.azureRole ||
+          instanceRoleMappingIndex.get(backendServiceId)?.get(String(selectedInstance || '').trim().toLowerCase())
+            ?.azure_role ||
+          null
+        : null;
+      const tierAutomated = Boolean(
+        tierAutomatedRole &&
+          instanceRoleMappingIndex.get(backendServiceId)?.get(String(selectedInstance || '').trim().toLowerCase())
+            ?.tierAutomated
       );
-      const backendServiceId = matchedService ? Number(matchedService.id) : null;
-      const availableRoles = backendServiceId ? serviceRolesByServiceId[backendServiceId] || [] : [];
-      const selectedRoles = backendServiceId ? selectedRolesByServiceId[backendServiceId] || [] : [];
-      
-      // Get service configuration for role selection
-      const enableRoleSelection = matchedService?.enable_role_selection !== false; // default true
-      const defaultRole = matchedService?.default_role || null;
-      const roleRequired = matchedService?.role_required !== false; // default true
 
       return {
-        catalogServiceId: Number(catalogService.id),
+        backendServiceId,
+        name: catalogService.name || catalogService.service_name || 'Unnamed service',
+        availableInstances,
+        selectedInstance,
+        supportsInstances,
+        tierAutomated,
+        resolveInstanceRole: (instanceOption) => {
+          const mapping = instanceRoleMappingIndex
+            .get(backendServiceId)
+            ?.get(String(instanceOption || '').trim().toLowerCase());
+
+          if (!mapping?.tierAutomated) {
+            return null;
+          }
+
+          return String(mapping.azureRole || mapping.azure_role || '').trim() || null;
+        }
+      };
+    });
+  }, [instancesByServiceId, selectedCatalogServices, selectedInstancesByServiceId, instanceRoleMappingIndex]);
+
+  const selectedServiceRoleEntries = useMemo(() => {
+    const lookupTierRole = (serviceId, instanceOption) => {
+      const mapping = instanceRoleMappingIndex
+        .get(Number(serviceId))
+        ?.get(String(instanceOption || '').trim().toLowerCase());
+
+      if (!mapping?.tierAutomated) {
+        return null;
+      }
+
+      return String(mapping.azureRole || mapping.azure_role || '').trim() || null;
+    };
+
+    return selectedCatalogServices.map((catalogService) => {
+      const backendServiceId = Number(catalogService.id);
+      const availableRoles = backendServiceId ? serviceRolesByServiceId[backendServiceId] || [] : [];
+      const selectedRoles = backendServiceId ? selectedRolesByServiceId[backendServiceId] || [] : [];
+      const selectedInstance = backendServiceId ? selectedInstancesByServiceId[backendServiceId] || '' : '';
+      const tierAutomatedRole = backendServiceId
+        ? lookupTierRole(backendServiceId, selectedInstance)
+        : null;
+      const tierAutomated = Boolean(tierAutomatedRole);
+      const enableRoleSelection = tierAutomated
+        ? false
+        : catalogService.enable_role_selection !== false;
+      const defaultRole = tierAutomated
+        ? tierAutomatedRole
+        : catalogService.default_role || null;
+      const roleRequired = catalogService.role_required !== false;
+
+      return {
+        catalogServiceId: backendServiceId,
         name: catalogService.name || catalogService.service_name || 'Unnamed service',
         backendServiceId,
         availableRoles,
         selectedRoles,
+        selectedInstance,
         enableRoleSelection,
         defaultRole,
         roleRequired,
-        loading:
-          provisionableServicesLoading ||
-          (backendServiceId ? serviceRolesByServiceId[backendServiceId] === undefined : false)
+        tierAutomated,
+        tierAutomatedRole,
+        loading: servicesLoading
       };
     });
   }, [
-    provisionableServices,
-    provisionableServicesLoading,
     pricedServices,
     selectedCatalogServices,
     selectedRolesByServiceId,
-    serviceRolesByServiceId
+    selectedInstancesByServiceId,
+    serviceRolesByServiceId,
+    instanceRoleMappingIndex,
+    servicesLoading
   ]);
 
   useEffect(() => {
@@ -231,49 +421,69 @@ export default function RequestWorkspace() {
   }, [selectedServiceRoleEntries]);
 
   useEffect(() => {
-    let cancelled = false;
+    const activeBackendServiceIds = new Set(
+      selectedServiceInstanceEntries
+        .map((entry) => entry.backendServiceId)
+        .filter((value) => Number.isInteger(value) && value > 0)
+    );
 
-    const loadServiceRoles = async () => {
-      const missingEntries = selectedServiceRoleEntries.filter(
-        (entry) => entry.backendServiceId && serviceRolesByServiceId[entry.backendServiceId] === undefined
-      );
+    setSelectedInstancesByServiceId((current) => {
+      const next = {};
+      let changed = false;
 
-      if (missingEntries.length === 0) {
-        return;
+      for (const [serviceId, instanceOption] of Object.entries(current)) {
+        if (activeBackendServiceIds.has(Number(serviceId))) {
+          next[serviceId] = instanceOption;
+        } else {
+          changed = true;
+        }
       }
 
-      const nextRoles = {};
+      return changed ? next : current;
+    });
+  }, [selectedServiceInstanceEntries]);
 
-      await Promise.all(
-        missingEntries.map(async (entry) => {
-          try {
-            const roles = await getServiceRoles(entry.backendServiceId);
+  useEffect(() => {
+    setSelectedRolesByServiceId((current) => {
+      let next = null;
 
-            if (!cancelled) {
-              nextRoles[entry.backendServiceId] = Array.isArray(roles) ? roles : [];
-            }
-          } catch (error) {
-            if (!cancelled) {
-              nextRoles[entry.backendServiceId] = [];
-            }
-          }
-        })
-      );
+      for (const entry of selectedServiceRoleEntries) {
+        if (!entry.tierAutomated || !entry.backendServiceId || !entry.tierAutomatedRole) {
+          continue;
+        }
 
-      if (!cancelled && Object.keys(nextRoles).length > 0) {
-        setServiceRolesByServiceId((current) => ({
-          ...current,
-          ...nextRoles
-        }));
+        const key = String(entry.backendServiceId);
+        const autoRoles = [entry.tierAutomatedRole];
+        const currentRoles = Array.isArray(current[key]) ? current[key] : [];
+
+        if (
+          currentRoles.length === autoRoles.length &&
+          currentRoles.every((role, index) => role === autoRoles[index])
+        ) {
+          continue;
+        }
+
+        if (!next) {
+          next = { ...current };
+        }
+
+        next[key] = autoRoles;
       }
-    };
 
-    loadServiceRoles();
+      return next || current;
+    });
+  }, [selectedServiceRoleEntries]);
 
-    return () => {
-      cancelled = true;
-    };
-  }, [selectedServiceRoleEntries, serviceRolesByServiceId]);
+  const selectedInstancesPayload = useMemo(
+    () =>
+      selectedServiceInstanceEntries
+        .filter((entry) => entry.supportsInstances && entry.selectedInstance)
+        .map((entry) => ({
+          serviceId: Number(entry.backendServiceId),
+          instanceOption: entry.selectedInstance
+        })),
+    [selectedServiceInstanceEntries]
+  );
 
   const selectedDuration = useMemo(() => {
     if (!form.startDate || !form.endDate) {
@@ -299,6 +509,13 @@ export default function RequestWorkspace() {
     () =>
       selectedServiceRoleEntries
         .map((entry) => {
+          if (entry.tierAutomated && entry.tierAutomatedRole && entry.backendServiceId) {
+            return {
+              serviceId: Number(entry.backendServiceId),
+              roles: [entry.tierAutomatedRole]
+            };
+          }
+
           // If role selection is disabled, auto-assign default role
           if (!entry.enableRoleSelection && entry.defaultRole && entry.backendServiceId) {
             console.log(`[ROLE_AUTO_ASSIGNED] Service ${entry.name}: ${entry.defaultRole}`);
@@ -361,7 +578,7 @@ export default function RequestWorkspace() {
   });
 
   useEffect(() => {
-    if (selectedServiceIds.length === 0 || !form.location) {
+    if (selectedServiceIds.length === 0 || !form.location || !parsedAccountCount || selectedDuration.days <= 0) {
       setPricing({
         loading: false,
         error: '',
@@ -371,46 +588,70 @@ export default function RequestWorkspace() {
         accounts: 0,
         services: 0
       });
-      return;
+      return undefined;
     }
 
-    if (servicesLoading) {
-      setPricing({
-        loading: true,
-        error: '',
-        totalPrice: null,
-        basePrice: null,
-        duration: selectedDuration.days,
-        accounts: Number(parsedAccountCount || 1),
-        services: selectedCatalogServices.length
+    let cancelled = false;
+
+    setPricing((current) => ({
+      ...current,
+      loading: true,
+      error: ''
+    }));
+
+    calculatePricingEstimate({
+      accountCount: parsedAccountCount,
+      serviceIds: selectedServiceIds,
+      location: form.location,
+      startDate: form.startDate,
+      endDate: form.endDate,
+      selectedInstances: selectedInstancesPayload,
+      selectedRoles: selectedRolesPayload
+    })
+      .then((result) => {
+        if (cancelled) {
+          return;
+        }
+
+        setPricing({
+          loading: false,
+          error: '',
+          basePrice: Number(result.basePrice || 0),
+          duration: Number(result.duration || 0),
+          accounts: Number(result.accounts || parsedAccountCount),
+          services: Array.isArray(result.services) ? result.services.length : selectedCatalogServices.length,
+          totalPrice: Number(result.totalPrice || 0)
+        });
+      })
+      .catch((error) => {
+        if (cancelled) {
+          return;
+        }
+
+        setPricing({
+          loading: false,
+          error: error.message,
+          totalPrice: null,
+          basePrice: null,
+          duration: selectedDuration.days > 0 ? Math.max(1, Math.ceil(selectedDuration.days)) : 0,
+          accounts: parsedAccountCount,
+          services: selectedCatalogServices.length
+        });
       });
-      return;
-    }
 
-    const selected = pricedServices.filter((service) => selectedServices.includes(String(service.id)));
-    const basePrice = selected.reduce((sum, service) => sum + Number(service.retail_price || service.price || 0), 0);
-    const duration = selectedDuration.days > 0 ? Math.max(1, Math.ceil(selectedDuration.days)) : 0;
-    const accounts = Number(parsedAccountCount || 1);
-    const total = basePrice * duration * accounts;
-
-    setPricing({
-      loading: false,
-      error: '',
-      basePrice,
-      duration,
-      accounts,
-      services: selected.length,
-      totalPrice: Number(total.toFixed(2))
-    });
+    return () => {
+      cancelled = true;
+    };
   }, [
-    selectedServices,
-    selectedServiceIds.length,
-    parsedAccountCount,
+    form.endDate,
     form.location,
+    form.startDate,
+    parsedAccountCount,
+    selectedCatalogServices.length,
     selectedDuration.days,
-    pricedServices,
-    servicesLoading,
-    selectedCatalogServices.length
+    selectedInstancesPayload,
+    selectedRolesPayload,
+    selectedServiceIds
   ]);
 
   const handleSubmit = async (event) => {
@@ -455,6 +696,15 @@ export default function RequestWorkspace() {
       }
     }
 
+    const missingInstance = selectedServiceInstanceEntries.some(
+      (entry) => entry.supportsInstances && !entry.selectedInstance
+    );
+
+    if (missingInstance) {
+      setSubmitError('Select an instance option for each service that supports instances.');
+      return;
+    }
+
     if (!form.location) {
       setSubmitError('Select a region for the selected services.');
       return;
@@ -475,7 +725,8 @@ export default function RequestWorkspace() {
         startDate: form.startDate,
         endDate: form.endDate,
         serviceIds: payload.serviceIds,
-        selectedRoles: selectedRolesPayload
+        selectedRoles: selectedRolesPayload,
+        selectedInstances: selectedInstancesPayload
       };
 
       // Add daily usage fields if enabled
@@ -532,9 +783,19 @@ export default function RequestWorkspace() {
         <RequestForm
           form={form}
           locations={locations}
+          categories={categories}
           services={pricedServices}
           selectedServiceIds={selectedServices}
           selectedServiceRoleEntries={selectedServiceRoleEntries}
+          selectedServiceInstanceEntries={selectedServiceInstanceEntries}
+          onSelectServiceInstance={(serviceId, instanceOption) => {
+            setSubmitError('');
+            setSubmitDebug('');
+            setSelectedInstancesByServiceId((current) => ({
+              ...current,
+              [String(serviceId)]: instanceOption
+            }));
+          }}
           onToggleServiceRole={(serviceId, roleName) => {
             setSubmitError('');
             setSubmitDebug('');
@@ -556,10 +817,12 @@ export default function RequestWorkspace() {
           onSubmit={handleSubmit}
           submitting={submitting}
           error={submitError}
-          loadingServices={locationsLoading || servicesLoading}
+          loadingServices={locationsLoading || servicesLoading || instancesLoading}
           locationsLoading={locationsLoading}
           locationsError={locationsError}
           servicesError={servicesError}
+          instancesLoading={instancesLoading}
+          instancesError={instancesError}
           accountCount={parsedAccountCount || 0}
           durationHours={selectedDuration.hours}
         />
@@ -581,7 +844,7 @@ export default function RequestWorkspace() {
             events={[
               { title: 'Pricing', message: 'Use the chosen region to calculate the estimated monthly cost from the selected services.' },
               { title: 'Request', message: 'Create the request record and capture the request ID.' },
-              { title: 'Provisioning', message: 'Create the resource group, users, roles, and credentials.' },
+              { title: 'Provisioning', message: 'Create the resource group, Azure service instances, users, roles, and credentials.' },
               { title: 'Status', message: 'Redirect to the live status page once the request is created.' }
             ]}
           />

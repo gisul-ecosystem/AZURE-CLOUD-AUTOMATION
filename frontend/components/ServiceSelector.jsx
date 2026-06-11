@@ -14,28 +14,53 @@ const normalizeText = (value) => String(value || '').trim().toLowerCase();
 
 const SearchableMultiSelect = ({
   options = [],
+  categories = [],
   selectedIds = [],
   onChange,
   placeholder = 'Search Azure services...'
 }) => {
   const [query, setQuery] = useState('');
+  const [selectedCategory, setSelectedCategory] = useState('all');
   const [isOpen, setIsOpen] = useState(true);
 
   const selectedSet = useMemo(() => new Set(selectedIds.map((value) => String(value))), [selectedIds]);
 
+  const categoryOptions = useMemo(() => {
+    const fromApi = Array.isArray(categories)
+      ? categories
+          .map((category) => category?.name || category?.label || '')
+          .filter(Boolean)
+      : [];
+
+    if (fromApi.length > 0) {
+      return fromApi;
+    }
+
+    return Array.from(
+      new Set(
+        options
+          .map((option) => option.service_family || option.category || '')
+          .filter(Boolean)
+      )
+    ).sort();
+  }, [categories, options]);
+
   const filteredOptions = useMemo(() => {
     const normalizedQuery = normalizeText(query);
-
-    if (!normalizedQuery) {
-      return options;
-    }
 
     return options.filter((option) => {
       const name = normalizeText(option.service_name || option.name);
       const category = normalizeText(option.service_family || option.category);
-      return name.includes(normalizedQuery) || category.includes(normalizedQuery);
+      const matchesCategory =
+        selectedCategory === 'all' ||
+        category === normalizeText(selectedCategory) ||
+        (option.service_family || option.category) === selectedCategory;
+      const matchesQuery =
+        !normalizedQuery || name.includes(normalizedQuery) || category.includes(normalizedQuery);
+
+      return matchesCategory && matchesQuery;
     });
-  }, [options, query]);
+  }, [options, query, selectedCategory]);
 
   const toggle = (serviceId) => {
     const normalizedId = String(serviceId);
@@ -80,6 +105,28 @@ const SearchableMultiSelect = ({
                 placeholder={placeholder}
               />
             </label>
+
+            {categoryOptions.length > 0 ? (
+              <div className="topbar-actions" style={{ flexWrap: 'wrap', gap: 8, marginBottom: 14 }}>
+                <button
+                  type="button"
+                  className={`btn btn--secondary${selectedCategory === 'all' ? ' is-selected' : ''}`}
+                  onClick={() => setSelectedCategory('all')}
+                >
+                  All
+                </button>
+                {categoryOptions.map((category) => (
+                  <button
+                    key={category}
+                    type="button"
+                    className={`btn btn--secondary${selectedCategory === category ? ' is-selected' : ''}`}
+                    onClick={() => setSelectedCategory(category)}
+                  >
+                    {category}
+                  </button>
+                ))}
+              </div>
+            ) : null}
 
             <div className="topbar-actions" style={{ justifyContent: 'space-between', marginBottom: 14 }}>
               <span className="helper-badge">Selected: {selectedIds.length}</span>
@@ -149,6 +196,7 @@ const SearchableMultiSelect = ({
 
 export default function ServiceSelector({
   services = [],
+  categories = [],
   selectedServiceIds = [],
   onSelectionChange,
   loadingServices = false,
@@ -183,7 +231,7 @@ export default function ServiceSelector({
           <p>
             {location
               ? `Priced for ${location}`
-              : 'Browse Azure services, then hover any row to see price and metadata before selecting.'}
+              : 'Browse Azure services by category, then hover any row to see price and metadata before selecting.'}
           </p>
         </div>
         <span className="helper-badge">Selected: {selectedServiceIds.length}</span>
@@ -191,6 +239,7 @@ export default function ServiceSelector({
 
       <SearchableMultiSelect
         options={services}
+        categories={categories}
         selectedIds={selectedServiceIds}
         onChange={onSelectionChange}
         placeholder="Search Azure services..."

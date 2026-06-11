@@ -2,7 +2,15 @@ const AppError = require('../utils/AppError');
 const pricingService = require('../services/pricingService');
 const { parseFlexibleDateTime } = require('../utils/dateTime');
 
-const allowedPricingFields = new Set(['accountCount', 'serviceIds', 'location', 'startDate', 'endDate']);
+const allowedPricingFields = new Set([
+  'accountCount',
+  'serviceIds',
+  'location',
+  'startDate',
+  'endDate',
+  'selectedInstances',
+  'selectedRoles'
+]);
 const DEFAULT_LOCATION = 'eastus';
 const DEFAULT_START_DATE = () => new Date().toISOString().slice(0, 10);
 const DEFAULT_END_DATE = () => new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10);
@@ -70,7 +78,9 @@ const calculatePricing = async (req, res, next) => {
       serviceIds: req.body.serviceIds.map(Number),
       location: String(req.body.location || DEFAULT_LOCATION),
       startDate: String(req.body.startDate || DEFAULT_START_DATE()),
-      endDate: String(req.body.endDate || DEFAULT_END_DATE())
+      endDate: String(req.body.endDate || DEFAULT_END_DATE()),
+      selectedInstances: Array.isArray(req.body.selectedInstances) ? req.body.selectedInstances : [],
+      selectedRoles: Array.isArray(req.body.selectedRoles) ? req.body.selectedRoles : []
     };
 
     console.log(

@@ -9,6 +9,7 @@ const allowedRequestFields = new Set([
   'location',
   'serviceIds',
   'selectedRoles',
+  'selectedInstances',
   'provisionServiceIds',
   'startDate',
   'endDate',
@@ -24,6 +25,7 @@ const validateRequestPayload = (body) => {
     location,
     serviceIds,
     selectedRoles,
+    selectedInstances,
     provisionServiceIds,
     startDate,
     endDate,
@@ -96,13 +98,33 @@ const validateRequestPayload = (body) => {
       throw new AppError('selectedRoles.serviceId must be a positive integer.', 400);
     }
 
-    if (!Array.isArray(entry.roles) || entry.roles.length === 0) {
-      throw new AppError('selectedRoles.roles must be a non-empty array.', 400);
+    if (!Array.isArray(entry.roles)) {
+      throw new AppError('selectedRoles.roles must be an array.', 400);
     }
 
     const invalidRole = entry.roles.some((role) => typeof role !== 'string' || role.trim().length === 0);
     if (invalidRole) {
       throw new AppError('selectedRoles.roles must contain non-empty strings.', 400);
+    }
+  }
+
+  if (selectedInstances !== undefined) {
+    if (!Array.isArray(selectedInstances)) {
+      throw new AppError('selectedInstances must be an array when provided.', 400);
+    }
+
+    for (const entry of selectedInstances) {
+      if (!entry || typeof entry !== 'object') {
+        throw new AppError('selectedInstances must contain instance objects.', 400);
+      }
+
+      if (!Number.isInteger(entry.serviceId) || entry.serviceId <= 0) {
+        throw new AppError('selectedInstances.serviceId must be a positive integer.', 400);
+      }
+
+      if (typeof entry.instanceOption !== 'string' || entry.instanceOption.trim().length === 0) {
+        throw new AppError('selectedInstances.instanceOption must be a non-empty string.', 400);
+      }
     }
   }
 
@@ -141,6 +163,7 @@ const createRequest = async (req, res, next) => {
       location: req.body.location.trim(),
       serviceIds: req.body.serviceIds,
       selectedRoles: req.body.selectedRoles,
+      selectedInstances: Array.isArray(req.body.selectedInstances) ? req.body.selectedInstances : [],
       provisionServiceIds: Array.isArray(req.body.provisionServiceIds)
         ? req.body.provisionServiceIds
         : undefined,

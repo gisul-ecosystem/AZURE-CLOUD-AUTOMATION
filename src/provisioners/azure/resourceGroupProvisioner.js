@@ -123,12 +123,26 @@ const provisionResourceGroup = async ({ requestId, resourceGroupName, location }
     }
 
     const statusCode = Number(error?.statusCode || error?.status);
+    const errorCode = String(error?.code || '');
+    const azureMessage = String(error?.message || '').trim();
 
     if (statusCode === 401 || statusCode === 403) {
       throw new AppError('Azure authentication failed or access was denied.', 403);
     }
 
-    throw new AppError('Unable to create Azure resource group.', 502);
+    if (errorCode === 'LocationNotAvailableForResourceGroup') {
+      throw new AppError(
+        azureMessage ||
+          `Region '${location}' cannot be used for resource groups. Choose a production Azure region.`,
+        400
+      );
+    }
+
+    if (statusCode === 400 && azureMessage) {
+      throw new AppError(azureMessage, 400);
+    }
+
+    throw new AppError(azureMessage || 'Unable to create Azure resource group.', 502);
   }
 };
 
