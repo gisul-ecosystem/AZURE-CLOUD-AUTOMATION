@@ -18,6 +18,7 @@ const servicePricingRoutes = require('./src/routes/servicePricingRoutes');
 const requestRoutes = require('./src/routes/requestRoutes');
 const usageRoutes = require('./src/routes/usageRoutes');
 const serviceRoutes = require('./src/routes/serviceRoutes');
+const jobRoutes = require('./src/routes/jobRoutes');
 const AppError = require('./src/utils/AppError');
 const { pool } = require('./src/config/database');
 
@@ -60,6 +61,7 @@ app.use('/api/services/pricing', servicePricingRoutes);
 app.use('/api/requests', requestRoutes);
 app.use('/api/services', serviceRoutes);
 app.use('/api/usage', usageRoutes);
+app.use('/api/jobs', jobRoutes);
 
 app.all('*', (req, res, next) => {
   next(new AppError(`Route not found: ${req.originalUrl}`, 404));

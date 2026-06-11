@@ -1,11 +1,12 @@
 const db = require('../db/postgres');
 const AppError = require('../utils/AppError');
 const accessPortalService = require('./accessPortalService');
+const { enqueueEmail } = require('./emailQueueService');
 const {
   buildCredentialEmailHtml,
-  sendCredentialEmailWithRetry
 } = require('./email/credentialEmailService');
 
+const DELIVERY_STATUS_QUEUED = 'queued';
 const DELIVERY_STATUS_SENT = 'sent';
 
 const logCredentialEvent = (level, event, details = {}) => {
@@ -80,6 +81,7 @@ const loadCredentials = async (requestId) => {
 
 const upsertDeliveryRecord = async (client, requestId, recipientEmail, deliveryStatus) => {
   const createdAt = new Date();
+  const sentAt = deliveryStatus === DELIVERY_STATUS_SENT ? createdAt : null;
 
   const updateQuery = `
     UPDATE credential_delivery
@@ -96,7 +98,7 @@ const upsertDeliveryRecord = async (client, requestId, recipientEmail, deliveryS
     requestId,
     recipientEmail,
     deliveryStatus,
-    createdAt,
+    sentAt,
     createdAt
   ]);
 
@@ -120,7 +122,7 @@ const upsertDeliveryRecord = async (client, requestId, recipientEmail, deliveryS
     requestId,
     recipientEmail,
     deliveryStatus,
-    createdAt,
+    sentAt,
     createdAt
   ]);
 
@@ -178,13 +180,6 @@ const sendCredentials = async (requestId) => {
   const portalLink = portal.manageUrl;
   const adminCredentials = portal.adminCredentials;
 
-  await upsertDeliveryRecord(
-    db,
-    requestId,
-    request.customer_email,
-    DELIVERY_STATUS_SENT
-  );
-
   const html = buildCredentialEmailHtml({
     requestId,
     users,
@@ -200,13 +195,49 @@ const sendCredentials = async (requestId) => {
   });
 
   try {
-    await sendCredentialEmailWithRetry({
-      to: request.customer_email,
+    await upsertDeliveryRecord(
+      db,
+      requestId,
+      request.customer_email,
+      DELIVERY_STATUS_QUEUED
+    );
+
+    await enqueueEmail({
+      recipientEmail: request.customer_email,
       subject: `Azure Credentials Ready — Request #${requestId}`,
-      html
+      html,
+      relatedType: 'credential_delivery',
+      relatedId: String(requestId),
+      onSuccess: async () => {
+        await upsertDeliveryRecord(
+          db,
+          requestId,
+          request.customer_email,
+          DELIVERY_STATUS_SENT
+        );
+
+        logCredentialEvent('info', 'credential_delivery_email_success', {
+          requestId,
+          recipientEmail: request.customer_email
+        });
+      },
+      onFailure: async (error) => {
+        await upsertDeliveryRecord(
+          db,
+          requestId,
+          request.customer_email,
+          'failed'
+        );
+
+        logCredentialEvent('error', 'credential_delivery_email_failed', {
+          requestId,
+          recipientEmail: request.customer_email,
+          message: error?.message
+        });
+      }
     });
 
-    logCredentialEvent('info', 'credential_delivery_email_success', {
+    logCredentialEvent('info', 'credential_delivery_email_queued', {
       requestId,
       recipientEmail: request.customer_email
     });
@@ -216,7 +247,8 @@ const sendCredentials = async (requestId) => {
       requestId,
       portalLink,
       adminUsername: adminCredentials?.username || null,
-      usersSent: users.length
+      usersSent: users.length,
+      deliveryStatus: DELIVERY_STATUS_QUEUED
     };
   } catch (error) {
     logCredentialEvent('error', 'credential_delivery_failed', {

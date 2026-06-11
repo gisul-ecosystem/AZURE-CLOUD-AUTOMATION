@@ -201,6 +201,34 @@ export async function sendCredentials(requestId) {
   });
 }
 
+export async function createProvisioningJob(csvText, { sourceFilename = null } = {}) {
+  const response = await fetch(buildUrl('/api/jobs'), {
+    cache: 'no-store',
+    method: 'POST',
+    headers: {
+      accept: 'application/json',
+      'content-type': 'text/csv',
+      ...(sourceFilename ? { 'x-file-name': sourceFilename } : {})
+    },
+    body: csvText
+  });
+
+  const payload = await readPayload(response);
+
+  if (!response.ok) {
+    const error = new Error(extractMessage(payload, response.status));
+    error.status = response.status;
+    error.payload = payload;
+    throw error;
+  }
+
+  return payload;
+}
+
+export async function getProvisioningJob(jobId) {
+  return requestJson(`/api/jobs/${encodeURIComponent(jobId)}`);
+}
+
 export async function exchangeManageToken(token) {
   return requestJson(`/api/manage/token?token=${encodeURIComponent(token)}`);
 }
