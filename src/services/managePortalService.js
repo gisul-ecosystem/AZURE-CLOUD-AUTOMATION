@@ -13,7 +13,7 @@ const {
   roleAssignmentIdFromSeed
 } = require('../provisioners/azure/roleProvisioner');
 
-const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3001';
+const FRONTEND_URL = process.env.FRONTEND_URL || '';
 const ACCESS_TOKEN_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const RETRYABLE_STATUS_CODES = new Set([408, 429, 500, 502, 503, 504]);
 const MAX_ATTEMPTS = 3;

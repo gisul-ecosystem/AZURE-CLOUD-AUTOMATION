@@ -18,9 +18,10 @@ const pool = new Pool({
     ? false
     : { rejectUnauthorized: false },
   family: 4,
+  keepAlive: true,
   max: Number(process.env.SUPABASE_DB_POOL_MAX) || 20,
   idleTimeoutMillis: Number(process.env.SUPABASE_DB_IDLE_TIMEOUT_MS) || 30000,
-  connectionTimeoutMillis: Number(process.env.SUPABASE_DB_CONNECTION_TIMEOUT_MS) || 10000
+  connectionTimeoutMillis: Number(process.env.SUPABASE_DB_CONNECTION_TIMEOUT_MS) || 30000
 });
 
 pool.on('connect', () => {
