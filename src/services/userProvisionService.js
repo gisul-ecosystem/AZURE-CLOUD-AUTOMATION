@@ -7,9 +7,11 @@ const {
   getVerifiedDomain,
   logAzureUserEvent
 } = require('../provisioners/azure/userProvisioner');
+const { runWithConcurrency } = require('../utils/concurrency');
 const { evaluateUsageAccess } = require('./usageAccessEvaluator');
 
 const STATUS_CREATED = 'Created';
+const DEFAULT_CONCURRENCY = Math.max(1, Number(process.env.BULK_PROVISION_CONCURRENCY || 20));
 const STATUS_BLOCKED = 'Blocked';
 
 const getRequestByIdForUserProvisioning = async (client, requestId) => {
@@ -169,7 +171,8 @@ const provisionUsersForRequest = async (requestId) => {
 
     const createdUsers = [];
 
-    for (let userNumber = 1; userNumber <= accountCount; userNumber += 1) {
+    const userNumbers = Array.from({ length: accountCount }, (_, index) => index + 1);
+    await runWithConcurrency(userNumbers, DEFAULT_CONCURRENCY, async (userNumber) => {
       const { username, temporaryPassword, payload } = buildUserPayload({
         requestId,
         userNumber,
@@ -186,7 +189,7 @@ const provisionUsersForRequest = async (requestId) => {
         status: initialAccess.status,
         blockedUntil: initialAccess.blockedUntil
       });
-    }
+    });
 
     await insertAzureUsers(client, requestId, createdUsers);
 

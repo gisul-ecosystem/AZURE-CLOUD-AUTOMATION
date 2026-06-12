@@ -1,12 +1,15 @@
 const axios = require('axios');
-const { getAzureServiceName } = require('./servicePricingMap');
+const { resolveAzureRetailServiceName } = require('./servicePricingMap');
 
-const CACHE_TTL_MS = 5 * 60 * 1000;
+const CACHE_TTL_MS = 30 * 60 * 1000;
 const pricingCache = new Map();
 const filterCache = new Map();
 
 const DEFAULT_LOCATION = process.env.AZURE_PRICING_DEFAULT_REGION || 'centralindia';
 const PRICING_API_URL = 'https://prices.azure.com/api/retail/prices';
+const RETRYABLE_STATUS_CODES = new Set([408, 429, 500, 502, 503, 504]);
+const MAX_RETRY_ATTEMPTS = 4;
+const RETRY_BASE_DELAY_MS = 300;
 
 const logAzurePricingEvent = (event, details = {}) => {
   console.log(
@@ -20,6 +23,92 @@ const logAzurePricingEvent = (event, details = {}) => {
 };
 
 const escapeODataString = (value) => String(value).replace(/'/g, "''");
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const isRetryableError = (error) => {
+  const statusCode = Number(error?.response?.status || error?.statusCode || error?.status);
+
+  if (RETRYABLE_STATUS_CODES.has(statusCode)) {
+    return true;
+  }
+
+  return !statusCode && Boolean(error?.code);
+};
+
+const withRetry = async (operation, { attempts = MAX_RETRY_ATTEMPTS, baseDelayMs = RETRY_BASE_DELAY_MS } = {}) => {
+  let lastError;
+
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await operation(attempt);
+    } catch (error) {
+      lastError = error;
+
+      if (!isRetryableError(error) || attempt === attempts) {
+        throw error;
+      }
+
+      const retryAfterSeconds = Number(error?.response?.headers?.['retry-after']);
+      const retryAfterMs = Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0
+        ? retryAfterSeconds * 1000
+        : 0;
+      const backoffMs = retryAfterMs || baseDelayMs * (2 ** (attempt - 1));
+      await sleep(backoffMs);
+    }
+  }
+
+  throw lastError;
+};
+
+const formatCurrencyAmount = (amount, currency = 'USD') => {
+  const value = Number(amount);
+  if (!Number.isFinite(value)) {
+    return null;
+  }
+
+  const minimumFractionDigits = value >= 1 ? 2 : 0;
+  const maximumFractionDigits = value >= 1 ? 2 : 6;
+
+  return new Intl.NumberFormat('en-US', {
+    style: 'currency',
+    currency: currency || 'USD',
+    minimumFractionDigits,
+    maximumFractionDigits
+  }).format(value);
+};
+
+const formatBillingUnit = (unitOfMeasure) => {
+  const raw = String(unitOfMeasure || '').trim();
+  if (!raw) {
+    return '';
+  }
+
+  const normalized = raw
+    .replace(/^1\s+/i, '')
+    .replace(/^1000\s+/i, '1,000 ')
+    .replace(/^10000\s+/i, '10,000 ')
+    .replace(/\/+/g, ' / ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  return normalized;
+};
+
+const buildDisplayPrice = (price, currency, unitOfMeasure) => {
+  const formattedPrice = formatCurrencyAmount(price, currency);
+  const formattedUnit = formatBillingUnit(unitOfMeasure);
+
+  if (!formattedPrice) {
+    return null;
+  }
+
+  if (!formattedUnit) {
+    return formattedPrice;
+  }
+
+  return `${formattedPrice} / ${formattedUnit}`;
+};
 
 const normalizeLocation = (location) => {
   const rawLocation = typeof location === 'string' && location.trim().length > 0 ? location : DEFAULT_LOCATION;
@@ -68,6 +157,22 @@ const setCachedFilterItems = (filter, value) => {
     value,
     expiresAt: Date.now() + CACHE_TTL_MS
   });
+};
+
+const normalizeRegion = (region) => {
+  if (typeof region !== 'string') {
+    return '';
+  }
+
+  return region.trim().toLowerCase();
+};
+
+const normalizeSku = (sku) => {
+  if (typeof sku !== 'string') {
+    return '';
+  }
+
+  return sku.trim();
 };
 
 const selectBestPrice = (items) => {
@@ -157,10 +262,14 @@ const fetchRetailPriceItems = async (filter) => {
   let nextParams = { $filter: normalizedFilter };
 
   while (nextUrl) {
-    const response = await axios.get(nextUrl, {
-      params: nextParams,
-      timeout: 20000
-    });
+    const response = await withRetry(
+      () =>
+        axios.get(nextUrl, {
+          params: nextParams,
+          timeout: 20000
+        }),
+      { attempts: MAX_RETRY_ATTEMPTS, baseDelayMs: RETRY_BASE_DELAY_MS }
+    );
 
     const payload = response.data || {};
     if (Array.isArray(payload.Items)) {
@@ -175,20 +284,74 @@ const fetchRetailPriceItems = async (filter) => {
   return items;
 };
 
-const fetchAzureRetailPrices = async (serviceName, location) => {
-  const filter = `serviceName eq '${escapeODataString(serviceName)}' and armRegionName eq '${escapeODataString(location)}' and priceType eq 'Consumption'`;
-  return fetchRetailPriceItems(filter);
-};
+const buildRetailPricingFilter = ({ serviceName, region, sku }) => {
+  const mappedServiceName = resolveAzureRetailServiceName(serviceName);
+  const normalizedRegion = normalizeRegion(region);
+  const normalizedSku = normalizeSku(sku);
 
-const getAzureRetailPrice = async (serviceName, location) => {
-  const azureServiceName = getAzureServiceName(serviceName);
-
-  if (!azureServiceName) {
+  if (!mappedServiceName || !normalizedRegion) {
     return null;
   }
 
-  const normalizedLocation = normalizeLocation(location);
-  const cacheKey = `${azureServiceName.toLowerCase()}|${normalizedLocation}`;
+  const filters = [
+    `serviceName eq '${escapeODataString(mappedServiceName)}'`,
+    `armRegionName eq '${escapeODataString(normalizedRegion)}'`,
+    `priceType eq 'Consumption'`
+  ];
+
+  if (normalizedSku) {
+    filters.push(`(armSkuName eq '${escapeODataString(normalizedSku)}' or contains(skuName,'${escapeODataString(normalizedSku)}'))`);
+  }
+
+  return {
+    filter: filters.join(' and '),
+    serviceName: mappedServiceName,
+    region: normalizedRegion,
+    sku: normalizedSku || null
+  };
+};
+
+const findBestRetailPriceItem = (items, sku) => {
+  if (!Array.isArray(items) || items.length === 0) {
+    return null;
+  }
+
+  const normalizedSku = normalizeSku(sku).toLowerCase();
+  const candidates = normalizedSku
+    ? items.filter((item) => {
+        const armSku = String(item?.armSkuName || '').trim().toLowerCase();
+        const skuName = String(item?.skuName || '').trim().toLowerCase();
+        const meterName = String(item?.meterName || '').trim().toLowerCase();
+
+        return (
+          armSku === normalizedSku ||
+          skuName.includes(normalizedSku) ||
+          meterName.includes(normalizedSku)
+        );
+      })
+    : items;
+
+  const baseCandidates = candidates.length > 0 ? candidates : items;
+  return selectBestPrice(baseCandidates);
+};
+
+const lookupAzureRetailPrice = async ({ service, region, sku }) => {
+  const mapping = buildRetailPricingFilter({ serviceName: service, region, sku });
+
+  if (!mapping) {
+    return {
+      service: String(service || '').trim(),
+      location: String(region || '').trim().toLowerCase(),
+      sku: sku ? String(sku).trim() : null,
+      price: null,
+      currency: 'USD',
+      unit: '',
+      displayPrice: null,
+      message: 'Pricing unavailable'
+    };
+  }
+
+  const cacheKey = `${mapping.serviceName.toLowerCase()}|${mapping.region}|${mapping.sku || ''}`;
   const cachedPrice = getCachedPrice(cacheKey);
 
   if (cachedPrice) {
@@ -196,62 +359,117 @@ const getAzureRetailPrice = async (serviceName, location) => {
   }
 
   logAzurePricingEvent('azure_price_lookup_started', {
-    serviceName: azureServiceName,
-    location: normalizedLocation
+    serviceName: mapping.serviceName,
+    location: mapping.region,
+    sku: mapping.sku || null
   });
 
   try {
-    const items = await fetchAzureRetailPrices(azureServiceName, normalizedLocation);
-    const bestItem = selectBestPrice(items);
+    const items = await fetchRetailPriceItems(mapping.filter);
+    const bestItem = findBestRetailPriceItem(items, mapping.sku);
 
     if (!bestItem) {
-      logAzurePricingEvent('azure_price_lookup_completed', {
-        serviceName: azureServiceName,
-        location: normalizedLocation,
-        cached: false,
-        found: false
-      });
-      return null;
+      const fallback = {
+        service: mapping.serviceName,
+        location: mapping.region,
+        sku: mapping.sku || null,
+        price: null,
+        currency: 'USD',
+        unit: '',
+        displayPrice: null,
+        message: 'Pricing unavailable'
+      };
+
+      setCachedPrice(cacheKey, fallback);
+      return fallback;
     }
 
-    const priceResult = {
-      retailPrice: Number(bestItem.retailPrice),
-      currency: bestItem.currencyCode || 'USD',
-      serviceName: bestItem.serviceName || azureServiceName,
-      armRegionName: bestItem.armRegionName || normalizedLocation,
-      unitOfMeasure: bestItem.unitOfMeasure || null,
-      source: 'azure-retail',
+    const price = Number(bestItem.unitPrice ?? bestItem.retailPrice);
+    const currency = bestItem.currencyCode || 'USD';
+    const unit = bestItem.unitOfMeasure || '';
+    const result = {
+      service: bestItem.serviceName || mapping.serviceName,
+      location: bestItem.armRegionName || mapping.region,
+      sku: bestItem.armSkuName || mapping.sku || null,
+      price: Number.isFinite(price) ? price : null,
+      currency,
+      unit,
+      displayPrice: Number.isFinite(price) ? buildDisplayPrice(price, currency, unit) : null,
+      message: Number.isFinite(price) ? undefined : 'Pricing unavailable',
+      source: 'azure-retail-prices-api',
       raw: bestItem
     };
 
-    setCachedPrice(cacheKey, priceResult);
+    setCachedPrice(cacheKey, result);
 
     logAzurePricingEvent('azure_price_lookup_completed', {
-      serviceName: azureServiceName,
-      location: normalizedLocation,
+      serviceName: result.service,
+      location: result.location,
+      sku: result.sku,
       cached: false,
       found: true,
-      retailPrice: priceResult.retailPrice,
-      currency: priceResult.currency
+      unit: result.unit,
+      price: result.price,
+      currency: result.currency
     });
 
-    return priceResult;
+    return result;
   } catch (error) {
+    const fallback = {
+      service: mapping.serviceName,
+      location: mapping.region,
+      sku: mapping.sku || null,
+      price: null,
+      currency: 'USD',
+      unit: '',
+      displayPrice: null,
+      message: 'Pricing unavailable'
+    };
+
     logAzurePricingEvent('azure_price_lookup_completed', {
-      serviceName: azureServiceName,
-      location: normalizedLocation,
+      serviceName: mapping.serviceName,
+      location: mapping.region,
+      sku: mapping.sku || null,
       cached: false,
       found: false,
       error: error?.message || 'Azure pricing lookup failed'
     });
 
-    return null;
+    return fallback;
   }
 };
 
+const getAzureRetailPrice = async (serviceName, location, sku) => {
+  const result = await lookupAzureRetailPrice({
+    service: serviceName,
+    region: location,
+    sku
+  });
+
+  if (!result || result.price === null) {
+    return null;
+  }
+
+  return {
+    retailPrice: result.price,
+    currency: result.currency,
+    serviceName: result.service,
+    armRegionName: result.location,
+    armSkuName: result.sku,
+    unitOfMeasure: result.unit,
+    displayPrice: result.displayPrice,
+    source: result.source,
+    raw: result.raw
+  };
+};
+
 module.exports = {
-  getAzureRetailPrice,
+  buildDisplayPrice,
+  buildRetailPricingFilter,
   fetchRetailPriceItems,
+  getAzureRetailPrice,
+  lookupAzureRetailPrice,
   retailPriceToDaily,
-  selectLowestDailyPrice
+  selectLowestDailyPrice,
+  formatBillingUnit
 };

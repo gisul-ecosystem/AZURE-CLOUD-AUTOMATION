@@ -1,21 +1,30 @@
 const SERVICE_PRICING_MAP = {
-  'virtual machine': 'Virtual Machines',
-  'virtual machines': 'Virtual Machines',
-  vm: 'Virtual Machines',
-  'azure virtual machine': 'Virtual Machines',
   'azure virtual machines (vms)': 'Virtual Machines',
-  storage: 'Storage',
+  'azure virtual machine': 'Virtual Machines',
+  'virtual machines': 'Virtual Machines',
+  'virtual machine': 'Virtual Machines',
+  vm: 'Virtual Machines',
+  'azure kubernetes service (aks)': 'Azure Kubernetes Service',
+  'azure kubernetes service': 'Azure Kubernetes Service',
+  aks: 'Azure Kubernetes Service',
+  'azure app service': 'Azure App Service',
+  'azure functions': 'Functions',
+  functions: 'Functions',
   'azure blob storage': 'Storage',
   'azure data lake storage': 'Storage',
-  sql: 'SQL Database',
-  'sql database': 'SQL Database',
-  'azure sql': 'SQL Database',
+  storage: 'Storage',
   'azure sql database': 'SQL Database',
-  'azure app service': 'Azure App Service',
-  'azure functions': 'Azure App Service',
-  'azure key vault': 'Key Vault',
+  'azure sql': 'SQL Database',
+  'sql database': 'SQL Database',
+  sql: 'SQL Database',
   'azure cosmos db': 'Azure Cosmos DB',
-  'azure kubernetes service (aks)': 'Azure Kubernetes Service',
+  cosmos: 'Azure Cosmos DB',
+  'azure openai service': 'Azure OpenAI Service',
+  'azure ai search': 'Azure AI Search',
+  search: 'Azure AI Search',
+  'azure key vault': 'Key Vault',
+  keyvault: 'Key Vault',
+  'azure keyvault': 'Key Vault',
   'azure ai document intelligence': 'Foundry Tools',
   'document intelligence': 'Foundry Tools',
   'azure ai vision': 'Foundry Tools',
@@ -56,8 +65,11 @@ const getAzureServiceName = (service) => {
   return candidate.trim();
 };
 
+const resolveAzureRetailServiceName = (service) => getAzureServiceName(service);
+
 module.exports = {
   SERVICE_PRICING_MAP,
   getAzureServiceName,
-  normalizeServiceKey
+  normalizeServiceKey,
+  resolveAzureRetailServiceName
 };
